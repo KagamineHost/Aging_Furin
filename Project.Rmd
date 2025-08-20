@@ -1,0 +1,3072 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-06-28"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyverse)
+  library(DESeq2)
+  library(magrittr)
+  library(GOstats)
+  library(Category)
+  library(GO.db)
+  library(org.Hs.eg.db)
+  library(biomaRt)
+  library(clusterProfiler)
+  library(pheatmap)
+  library(RColorBrewer)
+  library(ggGenshin)
+})
+
+```
+
+## Data and metadata
+
+First, we start with sun exposed skin from lower leg.
+
+###Load data
+
+```{r}
+metadata <- read.delim("gene_reads_2017-06-05_v8_skin_sun_exposed_lower_leg.gct/GTEx_Analysis_v8_Annotations_SubjectPhenotypesDS.txt")
+
+data <- read.delim('gene_reads_2017-06-05_v8_skin_sun_exposed_lower_leg.gct/gene_reads_skin_sun_exposed_lower_leg.gct', skip = 2)
+```
+
+```{r}
+metadata
+head(data)
+```
+
+```{r}
+#png(filename="Metadata.png")
+barplot(table(metadata$AGE), main="Metadata") %>%
+  text(y = table(metadata$AGE)-15, labels = table(metadata$AGE))
+#dev.off()
+```
+```{r}
+#png(filename="Metadata_Lower_leg.png")
+barplot(table(ann.col$AGE), main="Metadata - Lower leg") %>%
+  text(y = table(ann.col$AGE) - 10, labels = table(ann.col$AGE))
+#dev.off()
+```
+```{r}
+#png(filename="Metadata_Suprapubic.png")
+barplot(table(ann.col.suprapubic$AGE), main="Metadata - Suprapubic") %>%
+  text(y = table(ann.col.suprapubic$AGE) - 10, labels = table(ann.col.suprapubic$AGE))
+#dev.off()
+```
+
+
+#### Notch related gene
+
+```{r}
+#notch_gene <- read.delim('Participating Molecules [R-HSA-157118].tsv')
+notch_gene <- read.csv('gProfiler_hsapiens_3-21-2025_1-10-43 PM.csv')
+notch_gene = notch_gene[notch_gene$converted_alias != 'None',]
+```
+
+```{r}
+notch_DNA <- notch_gene$Identifier[grepl("^ENSG", notch_gene$Identifier)]
+```
+
+```{r}
+notch_protein <- notch_gene$Identifier[notch_gene$MoleculeType=='Proteins']
+```
+
+```{r}
+notch_protein.ENSEMBL <- mapIds(org.Hs.eg.db, keys = notch_protein, keytype = 'UNIPROT', column = 'ENSEMBL')
+```
+
+```{r}
+gene_list= read.csv('gProfiler_hsapiens_3-23-2025_10-57-45 PM.csv')
+```
+
+
+## Data reform
+
+Prepare metadata
+
+```{r}
+## Each sample is named after GTEX.ID.XXXX. Extract the code after GTEX as ID
+id_data <- str_split(colnames(data)[c(-1,-2,-3)], pattern = "\\.", simplify = TRUE)[,2]
+
+
+# Change ID in metadata
+metadata$ID <- str_split(metadata$SUBJID, pattern = "-", simplify = TRUE)[,2]
+metadata$AGE <- factor(metadata$AGE)
+
+# Merge data and metadata
+metadata_transfrom <- merge(x = data.frame(ID = id_data, Name = colnames(data)[c(-1,-2,-3)]), y = metadata, by = "ID", all.x = TRUE)
+rownames(metadata_transfrom) <- metadata_transfrom$Name
+```
+
+```{r}
+metadata_transfrom
+```
+
+Extract counts
+
+```{r}
+counts <- data[,c(-1,-2,-3)]
+rownames(counts) <- data$Name
+```
+
+```{r}
+# Set 20-29 as control
+metadata_transfrom$AGE <-  relevel(metadata_transfrom$AGE, ref = '20-29')
+```
+
+## Create DESeq2 object
+
+```{r}
+dds <- DESeqDataSetFromMatrix(counts, 
+                              colData = metadata_transfrom, 
+                              design = ~ AGE)
+```
+
+### QC
+
+```{r}
+# Transform counts for data visualization
+rld <- rlog(dds, blind=TRUE)
+
+# Plot PCA
+
+DESeq2::plotPCA(rld, intgroup = "group_id")
+```
+
+### Run DESeq2
+
+```{r}
+# Run DESeq2 
+dds <- DESeq(dds, test = 'LRT', reduced = ~1)
+```
+
+### Results
+
+```{r}
+resultsNames(dds)
+res.name <- resultsNames(dds)[-1]
+```
+
+```{r}
+  # Set thresholds to select gene with adjust p < 0.05 and log2FoldChange greater than 1 or less than -1.
+padj_cutoff <- 0.05
+res.list <- list()
+
+for (i in (res.name)){
+  res <- results(dds, name = i, test = 'LRT')
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  sig_res <- dplyr::filter(res_tbl, padj < padj_cutoff) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  res.list[[i]] <- sig_res
+}
+
+```
+
+```{r}
+res.list
+```
+
+```{r}
+
+gene_list.res <- list()
+
+for (i in (res.name)){
+  res <- results(dds.skeletal, name = i, test = 'LRT')
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  sig_res <- dplyr::filter(res_tbl, str_extract(gene, pattern = '.+(?=\\.)') %in% gene_list$converted_alias) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  gene_list.res[[i]] <- sig_res
+}
+```
+
+```{r}
+gene_list.res
+```
+```{r}
+#normalized_counts.leg<- counts(dds.skeletal, normalized = TRUE)
+
+DEGs.list.skeletal = rownames(counts.skeletal)
+for (i in res.name){
+  DEGs.list.skeletal <- intersect(DEGs.list.skeletal, gene_list.res[[i]]$gene)
+}
+
+sig_norm.list.skeletal <- data.frame(normalized_counts.skeletal) %>%
+    rownames_to_column(var = "gene") %>%
+    dplyr::filter(gene %in% DEGs.list.skeletal)
+
+arrange(metadata_transfrom.skeletal,AGE) %>%
+  select(AGE) -> ann.col.skeletal
+
+mat.list.skeletal <- sig_norm.list.skeletal[ , 2:length(colnames(sig_norm.list.skeletal))]
+mat.list.skeletal <- mat.list.skeletal[,rownames(ann.col.skeletal)]
+rownames(mat.list.skeletal) = sig_norm.list.skeletal$gene
+```
+
+
+```{r}
+cor.test.list.skeletal<- data.frame()
+for (i in (1:nrow(gene_list))){
+  target = gene_list$initial_alias[i]
+  id = gene_list$converted_alias[i]
+  loc = which(str_extract(sig_norm.list.skeletal[,1], pattern = '.+(?=\\.)')==id)
+  cor.test.list.skeletal[i,1] <- id #ENSEMBL
+  cor.test.list.skeletal[i,2] <- target #SYMBOL
+  
+  df.skeletal <- cbind(t(mat.list.skeletal[loc,]), ann.col.skeletal)
+  colnames(df.skeletal) <- c('Expression', 'Age')
+  cor.temp = cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman')
+
+  cor.test.list.skeletal[i,3] <- as.numeric(cor.temp[4]) #Rho
+  cor.test.list.skeletal[i,4] <- as.numeric(cor.temp[3]) #Pvalue
+}
+colnames(cor.test.list.skeletal) <- c('ENSEMBL', 'SYMBOL', 'Rho', 'Pvalue')
+```
+
+```{r}
+cor.test.list.skeletal
+```
+
+```{r}
+df <- cbind(t(mat.list.skeletal[3,]), ann.col.skeletal)
+  colnames(df) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df$Age), y = as.numeric(df$Expression), method = 'spearman')
+  
+ggplot(df, aes(x=Age, y=Expression)) +
+  geom_boxplot()+
+  ggtitle(sig_norm[1,1])+
+  #coord_cartesian(ylim = c(0, 50000))+
+  geom_text(x=1.5, y=80000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(cor.test.list.skeletal$SYMBOL[cor.test.list.skeletal$ENSEMBL == str_extract(rownames(mat.list.skeletal)[3], pattern = '.+(?=\\.)')], "Skeletal")
+
+ggsave(file.path('Results/Muscle_skeletal', paste('Barplot_',cor.test.list.skeletal$SYMBOL[cor.test.list.skeletal$ENSEMBL == str_extract(rownames(mat.list.skeletal)[3], pattern = '.+(?=\\.)')], '.png', sep = '')))
+
+#print(paste(sig_norm[1,1],' VS Age'))
+#print(cor.temp)
+```
+
+
+
+### notch related RNA
+
+Likelihood ratio test (LRT) is used to identify any genes that show change in expression across the different levels. This type of test can be especially useful in analyzing time course experiments.
+
+```{r}
+res.list.notch <- list()
+for (i in (res.name)){
+  res <- results(dds, name = i, test = 'LRT') 
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  notch_res <- dplyr::filter(res_tbl, str_extract(gene, pattern = '.+(?=\\.)') %in% notch_DNA&padj < padj_cutoff) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  res.list.notch[[i]] <- notch_res
+}
+```
+
+```{r}
+res.list.notch
+```
+
+There are 9 genes related to Notch has padj \< 0.05
+
+Translate to gene SYMBOL
+
+```{r}
+res.notch.SYMBOL <- mapIds(org.Hs.eg.db, keys = str_extract(res.list.notch[[1]]$gene, pattern = '.+(?=\\.)'), keytype = 'ENSEMBL', column = 'SYMBOL' )
+res.notch.SYMBOL
+```
+
+### notch related genes (All)
+
+```{r}
+res.list.notch.proteins <- list()
+for (i in (res.name)){
+  res <- results(dds, name = i, test = 'LRT') 
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  notch_res <- dplyr::filter(res_tbl, str_extract(gene, pattern = '.+(?=\\.)') %in% notch_gene$converted_alias&padj < padj_cutoff) %>%
+        dplyr::arrange(padj)
+  
+  notch_res
+  
+  # Save DEG
+  res.list.notch.proteins[[i]] <- notch_res
+}
+```
+```{r}
+res.list.notch.proteins
+```
+
+
+#### Spearman test on the correlation between age and genes lfc
+
+```{r}
+lfc = data.frame()
+for (i in (1:9)){
+  for (k in (1:5)){
+    lfc[i,k] <- as.numeric(res.list.notch[[k]][i,3])
+  }
+}
+rownames(lfc) <- res.list.notch[[1]]$gene
+colnames(lfc) <- res.name
+
+lfc['SYMBOL'] <- res.notch.SYMBOL
+lfc
+```
+
+```{r}
+cor.test.res <- data.frame()
+for (i in (1:9)){
+  print(paste(rownames(lfc)[i],' VS Age'))
+  cor.test.res[i,1] <- rownames(lfc)[i] #ENSEMBL
+  cor.test.res[i,2] <- res.notch.SYMBOL[i] #SYMBOL
+  res.cor <- cor.test(x = rank(res.name), y = as.numeric(lfc[i,-6]), method = 'spearman')
+  print(res.cor)
+  cor.test.res[i,3] <- as.numeric(res.cor[4]) #Rho
+  cor.test.res[i,4] <- as.numeric(res.cor[3]) #Pvalue
+}
+colnames(cor.test.res) <- c('ENSEMBL', 'SYMBOL', 'Rho', 'Pvalue')
+```
+
+ENSG00000134250, ENSG00000164683, ENSG00000074181 have negative correlation between lfc and age.
+
+ENSG00000100453, ENSG00000037280, ENSG00000114315 have positive correlation between lfc and age.
+
+```{r}
+cor.test.res = merge(x = lfc, y = cor.test.res, by = "SYMBOL")
+```
+
+```{r}
+write.csv(cor.test.res, file = 'Results/Skin_lower_leg/Cor_test_res_skin_lower_leg.csv')
+```
+
+#### Spearman test for notch proteins
+```{r}
+notch.proteins.SYMBOL = mapIds(org.Hs.eg.db, keys = str_extract(res.list.notch.proteins$AGE_30.39_vs_20.29$gene, pattern = '.+(?=\\.)'), keytype = 'ENSEMBL', column = 'SYMBOL' )
+lfc = data.frame()
+for (i in (1:45)){
+  for (k in (1:5)){
+    lfc[i,k] <- as.numeric(res.list.notch.proteins[[k]][i,3])
+  }
+}
+rownames(lfc) <- res.list.notch.proteins[[1]]$gene
+colnames(lfc) <- res.name
+
+lfc['SYMBOL'] <- notch.proteins.SYMBOL
+lfc
+```
+```{r}
+cor.test.res <- data.frame()
+for (i in (1:45)){
+  print(paste(rownames(lfc)[i],' VS Age'))
+  cor.test.res[i,1] <- notch.proteins.SYMBOL[i] #SYMBOL
+  res.cor <- cor.test(x = rank(res.name), y = as.numeric(lfc[i,-6]), method = 'spearman')
+  print(res.cor)
+  cor.test.res[i,2] <- as.numeric(res.cor[4]) #Rho
+  cor.test.res[i,3] <- as.numeric(res.cor[3]) #Pvalue
+}
+colnames(cor.test.res) <- c('SYMBOL', 'Rho', 'Pvalue')
+```
+```{r}
+cor.test.res = merge(x = lfc, y = cor.test.res, by = "SYMBOL")
+```
+
+```{r}
+write.csv(cor.test.res, file = 'Results/Skin_lower_leg/Cor_test_res_proteins_skin_lower_leg.csv')
+```
+#### Spearman test on the correlation between age and genes expression value
+
+```{r}
+df <- cbind(t(mat[1,]), ann.col)
+  colnames(df) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df$Age), y = as.numeric(df$Expression), method = 'spearman')
+  
+ggplot(df, aes(x=Age, y=Expression)) +
+  geom_boxplot()+
+  ggtitle(sig_norm[1,1])+
+  geom_text(x=5.5, y=31000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL[str_extract(sig_norm[1,1], pattern = '.+(?=\\.)')], "Lower leg")
+
+ggsave(file.path('Results/Skin_lower_leg', paste('Barplot_',res.notch.SYMBOL[str_extract(sig_norm[1,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm[1,1],' VS Age'))
+print(cor.temp)
+```
+
+
+```{r}
+df <- cbind(t(mat[2,]), ann.col)
+  colnames(df) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df$Age), y = as.numeric(df$Expression), method = 'spearman')
+  
+ggplot(df, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm[2,1])+
+  geom_text(x=1.5, y=61000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL[str_extract(sig_norm[2,1], pattern = '.+(?=\\.)')], "Lower leg")
+
+ggsave(file.path('Results/Skin_lower_leg', paste('Barplot_',res.notch.SYMBOL[str_extract(sig_norm[2,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm[2,1],' VS Age'))
+print(cor.temp)
+```
+
+```{r}
+df <- cbind(t(mat[3,]), ann.col)
+  colnames(df) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df$Age), y = as.numeric(df$Expression), method = 'spearman')
+
+ggplot(df, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm[3,1])+
+  geom_text(x=1.5, y=5000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL[str_extract(sig_norm[3,1], pattern = '.+(?=\\.)')], "Lower leg")
+
+ggsave(file.path('Results/Skin_lower_leg', paste('Barplot_',res.notch.SYMBOL[str_extract(sig_norm[3,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm[3,1],' VS Age'))
+print(cor.temp)
+```
+
+```{r}
+df <- cbind(t(mat[4,]), ann.col)
+  colnames(df) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df$Age), y = as.numeric(df$Expression), method = 'spearman')
+
+ggplot(df, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm[4,1])+
+  geom_text(x=1.5, y=12000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL[str_extract(sig_norm[4,1], pattern = '.+(?=\\.)')], "Lower leg")
+
+ggsave(file.path('Results/Skin_lower_leg', paste('Barplot_',res.notch.SYMBOL[str_extract(sig_norm[4,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm[4,1],' VS Age'))
+print(cor.temp)
+```
+
+```{r}
+df <- cbind(t(mat[5,]), ann.col)
+  colnames(df) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df$Age), y = as.numeric(df$Expression), method = 'spearman')
+
+ggplot(df, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm[5,1])+
+  geom_text(x=5.5, y=5000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL[str_extract(sig_norm[5,1], pattern = '.+(?=\\.)')], "Lower leg")
+
+ggsave(file.path('Results/Skin_lower_leg', paste('Barplot_',res.notch.SYMBOL[str_extract(sig_norm[5,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm[5,1],' VS Age'))
+print(cor.temp)
+```
+
+No significant correlation between ENSG00000164683 (HEY1) and age
+
+```{r}
+df <- cbind(t(mat[6,]), ann.col)
+  colnames(df) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df$Age), y = as.numeric(df$Expression), method = 'spearman')
+
+ggplot(df, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm[6,1])+
+  geom_text(x=1.5, y=80000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL[str_extract(sig_norm[6,1], pattern = '.+(?=\\.)')], "Lower leg")
+
+ggsave(file.path('Results/Skin_lower_leg', paste('Barplot_',res.notch.SYMBOL[str_extract(sig_norm[6,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm[6,1],' VS Age'))
+print(cor.temp)
+```
+
+No significant correlation between ENSG00000107796 and age
+
+```{r}
+df <- cbind(t(mat[7,]), ann.col)
+  colnames(df) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df$Age), y = as.numeric(df$Expression), method = 'spearman')
+  
+ggplot(df, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm[7,1])+
+  coord_cartesian(ylim = c(0, 100))+
+  geom_text(x=1.5, y=85, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL[str_extract(sig_norm[7,1], pattern = '.+(?=\\.)')], "Lower leg")
+
+ggsave(file.path('Results/Skin_lower_leg', paste('Barplot_',res.notch.SYMBOL[str_extract(sig_norm[7,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm[7,1],' VS Age'))
+print(cor.temp)
+```
+
+```{r}
+df <- cbind(t(mat[8,]), ann.col)
+  colnames(df) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df$Age), y = as.numeric(df$Expression), method = 'spearman')
+  
+ggplot(df, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm[8,1])+
+  geom_text(x=1.5, y=310, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL[str_extract(sig_norm[8,1], pattern = '.+(?=\\.)')], "Lower leg")
+
+ggsave(file.path('Results/Skin_lower_leg', paste('Barplot_',res.notch.SYMBOL[str_extract(sig_norm[8,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm[8,1],' VS Age'))
+print(cor.temp)
+```
+
+```{r}
+df <- cbind(t(mat[9,]), ann.col)
+  colnames(df) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df$Age), y = as.numeric(df$Expression), method = 'spearman')
+  
+ggplot(df, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm[9,1])+
+  geom_text(x=5.5, y=61000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL[str_extract(sig_norm[9,1], pattern = '.+(?=\\.)')], "Lower leg")
+
+ggsave(file.path('Results/Skin_lower_leg', paste('Barplot_',res.notch.SYMBOL[str_extract(sig_norm[9,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm[9,1],' VS Age'))
+print(cor.temp)
+```
+
+ENSG00000134250, ENSG00000037280, ENSG00000164434, ENSG00000100453, ENSG00000104921, ENSG00000074181 has p value \< 0.05
+
+#### Box plot for Notch protein
+
+```{r}
+DEGs.notch.proteins = rownames(counts)
+for (i in res.name){
+  DEGs.notch.proteins <- intersect(DEGs.notch.proteins, res.list.notch.proteins[[i]]$gene)
+}
+
+sig_norm.proteins <- data.frame(normalized_counts) %>%
+    rownames_to_column(var = "gene") %>%
+    dplyr::filter(gene %in% DEGs.notch.proteins)
+
+mat.proteins <- sig_norm.proteins[ , 2:length(colnames(sig_norm.proteins))]
+colnames(mat.proteins) <- str_split(colnames(mat.proteins), pattern = "\\.", simplify = TRUE)[,2]
+mat.proteins <- mat.proteins[,rownames(ann.col)]
+```
+
+```{r}
+df <- cbind(t(mat.proteins[34,]), ann.col)
+  colnames(df) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df$Age), y = as.numeric(df$Expression), method = 'spearman')
+  
+ggplot(df, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+  geom_text(x=5.5, y=31000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(notch.proteins.SYMBOL[str_extract(sig_norm.proteins[34,1], pattern = '.+(?=\\.)')], "Lower leg")
+
+ggsave(file.path('Results/Skin_lower_leg', paste('Barplot_',notch.proteins.SYMBOL[str_extract(sig_norm.proteins[34,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.proteins[34,1],' VS Age'))
+print(cor.temp)
+```
+
+```{r}
+X = 'NOTCH3'
+Y = 'FURIN'
+x = which(notch.proteins.SYMBOL==X)
+x = names(notch.proteins.SYMBOL)[x]
+x = which(str_extract(sig_norm.proteins[,1], pattern = '.+(?=\\.)')==x)
+
+y = which(notch.proteins.SYMBOL==Y)
+y = names(notch.proteins.SYMBOL)[y]
+y = which(str_extract(sig_norm.proteins[,1], pattern = '.+(?=\\.)')==y)
+
+x_y = cbind(t(mat.proteins[c(x,y),]), ann.col)
+colnames(x_y) <- c(X, Y,'Age')
+
+cor.temp = cor.test(x = x_y[[X]] , y = x_y[[Y]], method = 'pearson')
+
+ggplot(x_y, aes_string(x=X, y=Y)) +
+    geom_smooth()+
+  geom_point(size = 1, alpha = 1, aes(color = Age))+
+  #coord_cartesian(xlim = c(9000, 30000))+
+  geom_text(x=21000, y=25000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  scale_color_nilou(reverse = TRUE)+
+  ggtitle(paste(X,' VS ', Y), "Lower leg")
+
+ggsave(file.path('Results/Skin_lower_leg', paste(X,' vs ', Y, '.png', sep = '')))
+
+print(paste(X,' vs ', Y))
+print(cor.temp)
+```
+
+
+#### Upregulated and downregulated genes
+
+```{r}
+res.up.list <- list()
+
+for (i in (res.name)){
+  res <- results(dds, name = i, test = 'LRT')
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  sig_res <- dplyr::filter(res_tbl, padj < padj_cutoff& log2FoldChange>0) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  res.up.list[[i]] <- sig_res
+}
+```
+
+```{r}
+res.up.list
+```
+
+```{r}
+res.down.list <- list()
+
+for (i in (res.name)){
+  res <- results(dds, name = i, test = 'LRT')
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  sig_res <- dplyr::filter(res_tbl, padj < padj_cutoff& log2FoldChange<0) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  res.down.list[[i]] <- sig_res
+}
+```
+
+```{r}
+res.down.list
+```
+
+### Visualization
+
+```{r}
+mutate(res.list$AGE_30.39_vs_20.29, logP = -log(padj, base=10)) %>%
+  arrange(logP) %>%
+  head(10) %>%
+  ggplot(aes(x=gene, y=logP))+
+  geom_bar(stat = "identity")+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust= 1))
+
+mutate(res.list$AGE_40.49_vs_20.29, logP = -log(padj, base=10)) %>%
+  arrange(logP) %>%
+  head(10) %>%
+  ggplot(aes(x=gene, y=logP))+
+  geom_bar(stat = "identity")+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust= 1))
+
+mutate(res.list$AGE_50.59_vs_20.29, logP = -log(padj, base=10)) %>%
+  arrange(logP) %>%
+  head(10) %>%
+  ggplot(aes(x=gene, y=logP))+
+  geom_bar(stat = "identity")+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust= 1))
+
+mutate(res.list$AGE_60.69_vs_20.29, logP = -log(padj, base=10)) %>%
+  arrange(logP) %>%
+  head(10) %>%
+  ggplot(aes(x=gene, y=logP))+
+  geom_bar(stat = "identity")+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust= 1))
+
+mutate(res.list$AGE_70.79_vs_20.29, logP = -log(padj, base=10)) %>%
+  arrange(logP) %>%
+  head(10) %>%
+  ggplot(aes(x=gene, y=logP))+
+  geom_bar(stat = "identity")+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust= 1))
+```
+
+```{r}
+# Get norm conuts
+normalized_counts <- counts(dds, normalized = TRUE)
+
+# Get all DEG
+DEGs = rownames(counts)
+for (i in res.name){
+  DEGs <- intersect(DEGs, res.list[[i]]$gene)
+}
+
+# Get all DEG notch
+DEGs.notch = rownames(counts)
+for (i in res.name){
+  DEGs.notch <- intersect(DEGs.notch, res.list.notch[[i]]$gene)
+}
+
+# Extract normalized counts for only the significant genes
+  sig_norm <- data.frame(normalized_counts) %>%
+    rownames_to_column(var = "gene") %>%
+    dplyr::filter(gene %in% DEGs.notch)
+
+```
+
+```{r}
+# Set a color palette
+heat_colors <- brewer.pal(10,"RdBu")
+heat_colors = colorRampPalette(heat_colors)(50)
+heat_colors = rev(heat_colors)
+arrange(metadata_transfrom,AGE) %>%
+  select(AGE) -> ann.col
+mat <- sig_norm[ , 2:length(colnames(sig_norm))]
+colnames(mat) <- str_split(colnames(mat), pattern = "\\.", simplify = TRUE)[,2]
+mat <- mat[,rownames(ann.col)]
+
+```
+
+### GO Term analysis on all comparison
+
+```{r}
+mapIds(org.Hs.eg.db, keys = str_extract(DEGs, pattern = '.+(?=\\.)'), keytype = 'ENSEMBL', column = 'SYMBOL' )
+```
+
+```{r}
+GO_result <- list()
+GO_table <- list()
+universal.ENSEMBL <- str_extract(rownames(counts), pattern = '.+(?=\\.)')
+
+for (i in res.name){
+  ## Extract ENSEMBL ID from gene names
+  res.ENSEMBL <-  str_extract(unlist(res.list[[i]]$gene), pattern = '.+(?=\\.)')
+  
+  ## GO analysis
+  GO_result[[i]] <- enrichGO(res.ENSEMBL, org.Hs.eg.db, keyType = "ENSEMBL", ont = 'BP', universe = universal.ENSEMBL)
+  GO_table[[i]] <- as.data.frame(GO_result[[i]])
+}
+```
+
+```{r}
+GO_table
+```
+
+#### Notch related gene
+
+```{r}
+notch.res.down <- c('ENSG00000134250.19', 'ENSG00000074181.8', 'ENSG00000164683.16')
+res.ENSEMBL.notch.down <- str_extract(notch.res.down, pattern = '.+(?=\\.)')
+GO_result.notch.down <- enrichGO(res.ENSEMBL.notch.down, org.Hs.eg.db, keyType = "ENSEMBL", ont = 'BP', universe = universal.ENSEMBL)
+GO_table.notch.down <- as.data.frame(GO_result.notch.down)
+GO_table.notch.down
+```
+
+```{r}
+notch.res.up <- c('ENSG00000100453.12', 'ENSG00000037280.15', 'ENSG00000114315.3')
+res.ENSEMBL.notch.up <- str_extract(notch.res.up, pattern = '.+(?=\\.)')
+GO_result.notch.up <- enrichGO(res.ENSEMBL.notch.up, org.Hs.eg.db, keyType = "ENSEMBL", ont = 'BP', universe = universal.ENSEMBL)
+GO_table.notch.up <- as.data.frame(GO_result.notch.up)
+GO_table.notch.up
+```
+
+### Plot top 10 DEGs for each comparision
+
+```{r}
+mutate(GO_result[[1]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = res.name[1],
+               x = 'logP',
+             add = TRUE)
+mutate(GO_result[[2]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = res.name[2],
+               x = 'logP',
+             add = TRUE)
+mutate(GO_result[[3]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = res.name[3],
+               x = 'logP',
+             add = TRUE)
+mutate(GO_result[[4]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = res.name[4],
+               x = 'logP',
+             add = TRUE)
+
+mutate(GO_result[[5]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = res.name[4],
+               x = 'logP',
+             add = TRUE)
+```
+
+### Upregualted genes
+
+```{r}
+GO_result.up <- list()
+GO_table.up <- list()
+res.up.gene <- list()
+for (i in res.name){
+  ## Extract ENSEMBL ID from gene names
+  res.ENSEMBL <-  str_extract(unlist(res.up.list[[i]]$gene), pattern = '.+(?=\\.)')
+  res.up.gene[[i]] <- mapIds(org.Hs.eg.db, keys = res.ENSEMBL, keytype = 'ENSEMBL', column = 'SYMBOL')
+  ## GO analysis
+  GO_result.up[[i]] <- enrichGO(res.ENSEMBL, org.Hs.eg.db, keyType = "ENSEMBL", ont = 'BP', universe = universal.ENSEMBL)
+  GO_table.up[[i]] <- as.data.frame(GO_result.up[[i]])
+}
+```
+
+```{r}
+GO_table.up
+```
+
+#### Plot top 10 DEGs
+
+```{r}
+mutate(GO_result.up[[1]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = paste(res.name[1], ' up'),
+               x = 'logP',
+             add = TRUE)
+mutate(GO_result.up[[2]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = paste(res.name[2], ' up'),
+               x = 'logP',
+             add = TRUE)
+mutate(GO_result.up[[3]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = paste(res.name[3], ' up'),
+               x = 'logP',
+             add = TRUE)
+mutate(GO_result.up[[4]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = paste(res.name[4], ' up'),
+               x = 'logP',
+             add = TRUE)
+
+mutate(GO_result.up[[5]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = paste(res.name[5], ' up'),
+               x = 'logP',
+             add = TRUE)
+```
+
+### Downregualted genes
+
+```{r}
+GO_result.down <- list()
+GO_table.down <- list()
+res.down.gene <- list()
+for (i in res.name){
+  ## Extract ENSEMBL ID from gene names
+  res.ENSEMBL <-  str_extract(unlist(res.down.list[[i]]$gene), pattern = '.+(?=\\.)')
+  res.down.gene[[i]] <- mapIds(org.Hs.eg.db, keys = res.ENSEMBL, keytype = 'ENSEMBL', column = 'SYMBOL')
+  ## GO analysis
+  GO_result.down[[i]] <- enrichGO(res.ENSEMBL, org.Hs.eg.db, keyType = "ENSEMBL", ont = 'BP', universe = universal.ENSEMBL)
+  GO_table.down[[i]] <- as.data.frame(GO_result.down[[i]])
+}
+```
+
+```{r}
+GO_table.down
+```
+
+```{r}
+mutate(GO_result.down[[1]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = paste(res.name[1], ' down'),
+               x = 'logP',
+             add = TRUE)
+mutate(GO_result.down[[2]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = paste(res.name[2], ' down'),
+               x = 'logP',
+             add = TRUE)
+mutate(GO_result.down[[3]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = paste(res.name[3], ' down'),
+               x = 'logP',
+             add = TRUE)
+mutate(GO_result.down[[4]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = paste(res.name[4], ' down'),
+               x = 'logP',
+             add = TRUE)
+
+mutate(GO_result.down[[5]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = paste(res.name[5], ' down'),
+               x = 'logP',
+             add = TRUE)
+```
+
+```{r}
+
+Kegg_result <- list()
+universal.uniprot <- mapIds(org.Hs.eg.db, keys = universal.ENSEMBL, keytype = 'ENSEMBL', column = 'UNIPROT' )
+for (i in res.name){
+  ## Extract ENSEMBL ID from gene names
+  res.ENSEMBL <-  str_extract(unlist(res.list[[i]]$gene), pattern = '.+(?=\\.)')
+  res.uniprot = mapIds(org.Hs.eg.db, keys = res.ENSEMBL, keytype = 'ENSEMBL', column = 'UNIPROT' )
+  ## GO analysis
+  Kegg_result[[i]] <- enrichKEGG(res.uniprot, organism = "hsa",  keyType = "uniprot", universe = universal.uniprot)
+}
+
+```
+
+```{r}
+mutate(Kegg_result[[1]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = res.name[1],
+               x = 'logP',
+             add = TRUE)
+mutate(Kegg_result[[2]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = res.name[2],
+               x = 'logP',
+             add = TRUE)
+mutate(Kegg_result[[3]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = res.name[3],
+               x = 'logP',
+             add = TRUE)
+mutate(Kegg_result[[4]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = res.name[4],
+               x = 'logP',
+             add = TRUE)
+mutate(Kegg_result[[5]], logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = res.name[4],
+               x = 'logP',
+             add = TRUE)
+```
+
+```{r}
+for (i in res.name){
+  write.csv(res.up.gene[[i]], paste(i, '_up.csv'))
+  write.csv(res.down.gene[[i]], paste(i, '_down.csv'))
+}
+```
+
+## Suprapubic Skin
+
+```{r}
+metadata.suprapubic <- read.delim("gene_reads_2017-06-05_v8_skin_sun_exposed_lower_leg.gct/GTEx_Analysis_v8_Annotations_SubjectPhenotypesDS.txt")
+
+data.suprapubic <- read.delim('gene_reads_2017-06-05_v8_skin_not_sun_exposed_suprapubic.gct/gene_reads_skin_not_sun_exposed_suprapubic.gct', skip = 2)
+```
+
+```{r}
+counts.suprapubic <- data.suprapubic[,c(-1,-2,-3)]
+rownames(counts.suprapubic) <- data.suprapubic$Name
+```
+
+```{r}
+## Each sample is named after GTEX.ID.XXXX. Extract the code after GTEX as ID
+id_data.suprapubic <- str_split(colnames(data.suprapubic)[c(-1,-2,-3)], pattern = "\\.", simplify = TRUE)[,2]
+
+# Change ID in metadata
+metadata.suprapubic$ID <- str_split(metadata.suprapubic$SUBJID, pattern = "-", simplify = TRUE)[,2]
+metadata.suprapubic$AGE <- factor(metadata.suprapubic$AGE)
+
+# Merge data and metadata
+metadata_transfrom.suprapubic <- merge(x = data.frame(ID = id_data.suprapubic, Name = colnames(data.suprapubic)[c(-1,-2,-3)]), y = metadata.suprapubic, by = "ID", all.x = TRUE)
+rownames(metadata_transfrom.suprapubic) <- metadata_transfrom.suprapubic$Name
+```
+
+```{r}
+# Set 20-29 as control
+metadata_transfrom.suprapubic$AGE <-  relevel(metadata_transfrom.suprapubic$AGE, ref = '20-29')
+```
+
+## Create DESeq2 object
+
+```{r}
+dds.suprapubic <- DESeqDataSetFromMatrix(counts.suprapubic, 
+                              colData = metadata_transfrom.suprapubic, 
+                              design = ~ AGE)
+```
+
+### QC
+
+```{r}
+# Transform counts for data visualization
+rld.suprapubic <- rlog(dds.suprapubic, blind=TRUE)
+
+# Plot PCA
+
+DESeq2::plotPCA(rld.suprapubic, intgroup = "group_id")
+```
+
+### Run DESeq2
+
+```{r}
+# Run DESeq2 
+dds.suprapubic <- DESeq(dds.suprapubic, test = 'LRT', reduced = ~1)
+```
+
+### Results
+
+```{r}
+resultsNames(dds.suprapubic)
+res.name <- resultsNames(dds.suprapubic)[-1]
+```
+
+```{r}
+  # Set thresholds to select gene with adjust p < 0.05 and log2FoldChange greater than 1 or less than -1.
+padj_cutoff <- 0.05
+res.list.suprapubic <- list()
+
+for (i in (res.name)){
+  res <- results(dds.suprapubic, name = i, test = 'LRT')
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  sig_res <- dplyr::filter(res_tbl, padj < padj_cutoff) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  res.list.suprapubic[[i]] <- sig_res
+}
+
+```
+
+```{r}
+res.list.suprapubic
+```
+
+### notch related gene
+
+```{r}
+res.list.notch.suprapubic <- list()
+for (i in (res.name)){
+  res <- results(dds.suprapubic, name = i, test = 'LRT')
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  notch_res <- dplyr::filter(res_tbl, str_extract(gene, pattern = '.+(?=\\.)') %in% notch_DNA&padj < padj_cutoff) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  res.list.notch.suprapubic[[i]] <- notch_res
+}
+```
+
+```{r}
+res.list.notch.suprapubic
+```
+
+There are 10 genes related to Notch has padj \< 0.05
+
+Translate to gene SYMBOL
+
+```{r}
+res.notch.SYMBOL.suprapubic <- mapIds(org.Hs.eg.db, keys = str_extract(res.list.notch.suprapubic[[1]]$gene, pattern = '.+(?=\\.)'), keytype = 'ENSEMBL', column = 'SYMBOL' )
+res.notch.SYMBOL.suprapubic
+```
+
+#### Notch related proteins
+
+```{r}
+res.list.notch.proteins.suprapubic <- list()
+for (i in (res.name)){
+  res <- results(dds.suprapubic, name = i, test = 'LRT') 
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  notch_res <- dplyr::filter(res_tbl, str_extract(gene, pattern = '.+(?=\\.)') %in% notch_protein.ENSEMBL&padj < padj_cutoff) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  res.list.notch.proteins.suprapubic[[i]] <- notch_res
+}
+```
+```{r}
+res.list.notch.proteins.suprapubic
+```
+#### Spearman test on the correlation between age and genes lfc
+
+```{r}
+lfc.suprapubic = data.frame()
+for (i in (1:5)){
+  for (k in (1:5)){
+    lfc.suprapubic[i,k] <- as.numeric(res.list.notch.suprapubic[[k]][i,3])
+  }
+}
+rownames(lfc.suprapubic) <- res.list.notch.suprapubic[[1]]$gene
+colnames(lfc.suprapubic) <- res.name
+
+lfc.suprapubic['SYMBOL'] <- res.notch.SYMBOL.suprapubic
+lfc.suprapubic
+```
+
+```{r}
+cor.test.res.suprapubic <- data.frame()
+for (i in (1:5)){
+  print(paste(rownames(lfc.suprapubic)[i],' VS Age'))
+  cor.test.res.suprapubic[i,1] <- rownames(lfc.suprapubic)[i] #ENSEMBL
+  cor.test.res.suprapubic[i,2] <- res.notch.SYMBOL.suprapubic[i] #SYMBOL
+  res.cor <- cor.test(x = rank(res.name), y = as.numeric(lfc.suprapubic[i,-6]), method = 'spearman')
+  print(res.cor)
+  cor.test.res.suprapubic[i,3] <- as.numeric(res.cor[4]) #Rho
+  cor.test.res.suprapubic[i,4] <- as.numeric(res.cor[3]) #Pvalue
+}
+colnames(cor.test.res.suprapubic) <- c('ENSEMBL', 'SYMBOL', 'Rho', 'Pvalue')
+```
+
+```{r}
+cor.test.res.suprapubic = merge(x = lfc.suprapubic, y = cor.test.res.suprapubic, by = "SYMBOL")
+```
+
+```{r}
+write.csv(cor.test.res.suprapubic, file = 'Results/Skin_suprapubic/Cor_test_res_suprapubic.csv')
+```
+
+HEY1, NOTCH2, NOTCH3 are negatively related to age.
+
+#### Spearman test for notch proteins
+```{r}
+notch.proteins.SYMBOL.suprapubic = mapIds(org.Hs.eg.db, keys = str_extract(res.list.notch.proteins.suprapubic$AGE_30.39_vs_20.29$gene, pattern = '.+(?=\\.)'), keytype = 'ENSEMBL', column = 'SYMBOL' )
+lfc.suprapubic = data.frame()
+for (i in (1:61)){
+  for (k in (1:5)){
+    lfc.suprapubic[i,k] <- as.numeric(res.list.notch.proteins.suprapubic[[k]][i,3])
+  }
+}
+rownames(lfc.suprapubic) <- res.list.notch.proteins.suprapubic[[1]]$gene
+colnames(lfc.suprapubic) <- res.name
+
+lfc.suprapubic['SYMBOL'] <- notch.proteins.SYMBOL.suprapubic
+lfc.suprapubic
+```
+```{r}
+cor.test.res.suprapubic <- data.frame()
+for (i in (1:61)){
+  print(paste(rownames(lfc.suprapubic)[i],' VS Age'))
+  cor.test.res.suprapubic[i,1] <- notch.proteins.SYMBOL.suprapubic[i] #SYMBOL
+  res.cor <- cor.test(x = rank(res.name), y = as.numeric(lfc.suprapubic[i,-6]), method = 'spearman')
+  print(res.cor)
+  cor.test.res.suprapubic[i,2] <- as.numeric(res.cor[4]) #Rho
+  cor.test.res.suprapubic[i,3] <- as.numeric(res.cor[3]) #Pvalue
+}
+colnames(cor.test.res.suprapubic) <- c('SYMBOL', 'Rho', 'Pvalue')
+```
+
+```{r}
+cor.test.res.suprapubic = merge(x = lfc.suprapubic, y = cor.test.res.suprapubic, by = "SYMBOL")
+```
+
+```{r}
+write.csv(cor.test.res.suprapubic, file = 'Results/Skin_suprapubic/Cor_test_res_proteins_suprapubic.csv')
+```
+
+
+#### Spearman test on the correlation between age and genes expression value
+
+```{r}
+# Get norm conuts
+normalized_counts.suprapubic <- counts(dds.suprapubic, normalized = TRUE)
+
+# Get all DEG
+DEGs.suprapubic = rownames(counts.suprapubic)
+for (i in res.name){
+  DEGs.suprapubic <- intersect(DEGs, res.list.suprapubic[[i]]$gene)
+}
+
+# Get all DEG notch
+DEGs.notch.suprapubic = rownames(counts.suprapubic)
+for (i in res.name){
+  DEGs.notch.suprapubic <- intersect(DEGs.notch.suprapubic, res.list.notch.suprapubic[[i]]$gene)
+}
+# Extract normalized counts for only the significant genes
+  sig_norm.suprapubic <- data.frame(normalized_counts.suprapubic) %>%
+    rownames_to_column(var = "gene") %>%
+    dplyr::filter(gene %in% DEGs.notch.suprapubic)
+
+```
+
+```{r}
+arrange(metadata_transfrom.suprapubic,AGE) %>%
+  select(AGE) -> ann.col.suprapubic
+mat.suprapubic <- sig_norm.suprapubic[ , 2:length(colnames(sig_norm.suprapubic))]
+#colnames(mat.suprapubic) <- str_split(colnames(mat.suprapubic), pattern = "\\.", simplify = TRUE)[,2]
+mat.suprapubic <- mat.suprapubic[,rownames(ann.col.suprapubic)]
+```
+
+```{r}
+df.suprapubic <- cbind(t(mat.suprapubic[1,]), ann.col.suprapubic)
+  colnames(df.suprapubic) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.suprapubic$Age), y = as.numeric(df.suprapubic$Expression), method = 'spearman')
+
+ggplot(df.suprapubic, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.suprapubic[1,1]) +
+  geom_text(x=5.5, y=31000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.suprapubic[str_extract(sig_norm.suprapubic[1,1], pattern = '.+(?=\\.)')], "Suprapubic")
+
+ggsave(file.path('Results/Skin_suprapubic', paste('Barplot_',res.notch.SYMBOL.suprapubic[str_extract(sig_norm.suprapubic[1,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.suprapubic[1,1],' VS Age'))
+print(cor.temp)
+```
+
+```{r}
+df.suprapubic <- cbind(t(mat.suprapubic[2,]), ann.col.suprapubic)
+  colnames(df.suprapubic) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.suprapubic$Age), y = as.numeric(df.suprapubic$Expression), method = 'spearman')
+
+ggplot(df.suprapubic, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.suprapubic[2,1]) +
+  coord_cartesian(ylim = c(0, 75000))+
+  geom_text(x=5.5, y=70000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.suprapubic[str_extract(sig_norm.suprapubic[2,1], pattern = '.+(?=\\.)')], "Suprapubic")
+
+ggsave(file.path('Results/Skin_suprapubic', paste('Barplot_',res.notch.SYMBOL.suprapubic[str_extract(sig_norm.suprapubic[2,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.suprapubic[2,1],' VS Age'))
+print(cor.test(rank(df.suprapubic$Age), y = as.numeric(df.suprapubic$Expression), method = 'spearman'))
+```
+
+```{r}
+df.suprapubic <- cbind(t(mat.suprapubic[3,]), ann.col.suprapubic)
+  colnames(df.suprapubic) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.suprapubic$Age), y = as.numeric(df.suprapubic$Expression), method = 'spearman')
+
+ggplot(df.suprapubic, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.suprapubic[3,1]) +
+  geom_text(x=1.5, y=1400, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.suprapubic[str_extract(sig_norm.suprapubic[3,1], pattern = '.+(?=\\.)')], "Suprapubic")
+
+ggsave(file.path('Results/Skin_suprapubic', paste('Barplot_',res.notch.SYMBOL.suprapubic[str_extract(sig_norm.suprapubic[3,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.suprapubic[3,1],' VS Age'))
+print(cor.test(rank(df.suprapubic$Age), y = as.numeric(df.suprapubic$Expression), method = 'spearman'))
+```
+
+```{r}
+df.suprapubic <- cbind(t(mat.suprapubic[4,]), ann.col.suprapubic)
+  colnames(df.suprapubic) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.suprapubic$Age), y = as.numeric(df.suprapubic$Expression), method = 'spearman')
+
+ggplot(df.suprapubic, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.suprapubic[4,1]) +
+  coord_cartesian(ylim = c(0, 150))+
+  geom_text(x=1.5, y=120, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.suprapubic[str_extract(sig_norm.suprapubic[4,1], pattern = '.+(?=\\.)')], "Suprapubic")
+
+ggsave(file.path('Results/Skin_suprapubic', paste('Barplot_',res.notch.SYMBOL.suprapubic[str_extract(sig_norm.suprapubic[4,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.suprapubic[4,1],' VS Age'))
+print(cor.test(rank(df.suprapubic$Age), y = as.numeric(df.suprapubic$Expression), method = 'spearman'))
+```
+
+```{r}
+df.suprapubic <- cbind(t(mat.suprapubic[5,]), ann.col.suprapubic)
+  colnames(df.suprapubic) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.suprapubic$Age), y = as.numeric(df.suprapubic$Expression), method = 'spearman')
+
+ggplot(df.suprapubic, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.suprapubic[5,1]) +
+  coord_cartesian(ylim = c(18000, 75000))+
+  geom_text(x=5.5, y=73000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.suprapubic[str_extract(sig_norm.suprapubic[5,1], pattern = '.+(?=\\.)')], "Suprapubic")
+
+ggsave(file.path('Results/Skin_suprapubic', paste('Barplot_',res.notch.SYMBOL.suprapubic[str_extract(sig_norm.suprapubic[5,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.suprapubic[5,1],' VS Age'))
+print(cor.test(rank(df.suprapubic$Age), y = as.numeric(df.suprapubic$Expression), method = 'spearman'))
+```
+
+#### Boxplot for protein
+
+```{r}
+DEGs.notch.proteins.suprapubic = rownames(counts.suprapubic)
+for (i in res.name){
+  DEGs.notch.proteins.suprapubic <- intersect(DEGs.notch.proteins.suprapubic, res.list.notch.proteins.suprapubic[[i]]$gene)
+}
+
+sig_norm.proteins.suprapubic <- data.frame(normalized_counts.suprapubic) %>%
+    rownames_to_column(var = "gene") %>%
+    dplyr::filter(gene %in% DEGs.notch.proteins.suprapubic)
+
+mat.proteins.suprapubic <- sig_norm.proteins.suprapubic[ , 2:length(colnames(sig_norm.proteins.suprapubic))]
+mat.proteins.suprapubic <- mat.proteins.suprapubic[,rownames(ann.col.suprapubic)]
+```
+
+```{r}
+# Find target's index
+target = 'FURIN'
+i = which(notch.proteins.SYMBOL.suprapubic=='FURIN')
+i = names(notch.proteins.SYMBOL.suprapubic)[i]
+i = which(str_extract(sig_norm.proteins.suprapubic[,1], pattern = '.+(?=\\.)')==i)
+
+df.suprapubic <- cbind(t(mat.proteins.suprapubic[i,]), ann.col.suprapubic)
+  colnames(df.suprapubic) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.suprapubic$Age), y = as.numeric(df.suprapubic$Expression), method = 'spearman')
+  
+ggplot(df.suprapubic, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+  geom_text(x=5.5, y=24000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(notch.proteins.SYMBOL.suprapubic[str_extract(sig_norm.proteins.suprapubic[i,1], pattern = '.+(?=\\.)')], "Suprapubic")
+
+ggsave(file.path('Results/Skin_suprapubic', paste('Barplot_',notch.proteins.SYMBOL.suprapubic[str_extract(sig_norm.proteins.suprapubic[i,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.proteins.suprapubic[i,1],' VS Age'))
+print(cor.temp)
+```
+
+
+```{r}
+X = 'NOTCH3'
+Y = 'FURIN'
+x = which(notch.proteins.SYMBOL.suprapubic==X)
+x = names(notch.proteins.SYMBOL.suprapubic)[x]
+x = which(str_extract(sig_norm.proteins.suprapubic[,1], pattern = '.+(?=\\.)')==x)
+
+y = which(notch.proteins.SYMBOL.suprapubic==Y)
+y = names(notch.proteins.SYMBOL.suprapubic)[y]
+y = which(str_extract(sig_norm.proteins.suprapubic[,1], pattern = '.+(?=\\.)')==y)
+
+x_y = cbind(t(mat.proteins.suprapubic[c(x,y),]), ann.col.suprapubic)
+colnames(x_y) <- c(X, Y,'Age')
+
+cor.temp = cor.test(x = x_y[[X]] , y = x_y[[Y]], method = 'pearson')
+
+ggplot(x_y, aes_string(x=X, y=Y)) +
+    geom_smooth()+
+  geom_point(size = 1, alpha = 1, aes(color = Age))+
+  #coord_cartesian(xlim = c(9000, 30000))+
+  geom_text(x=21000, y=25000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  scale_color_nilou(reverse = TRUE)+
+  ggtitle(paste(X,' VS ', Y), "Suprapubic")
+
+ggsave(file.path('Results/Skin_suprapubic', paste(X,' vs ', Y, '.png', sep = '')))
+
+print(paste(X,' vs ', Y))
+print(cor.temp)
+```
+
+
+##test on nerve data
+
+```{r}
+metadata.nerve <- read.delim("gene_reads_2017-06-05_v8_skin_sun_exposed_lower_leg.gct/GTEx_Analysis_v8_Annotations_SubjectPhenotypesDS.txt")
+
+data.nerve <- read.delim('gene_reads_2017-06-05_v8_nerve_tibial.gct/gene_reads_nerve_tibial.gct', skip = 2)
+```
+
+```{r}
+counts.nerve <- data.nerve[,c(-1,-2,-3)]
+rownames(counts.nerve) <- data.nerve$Name
+```
+
+```{r}
+## Each sample is named after GTEX.ID.XXXX. Extract the code after GTEX as ID
+id_data.nerve <- str_split(colnames(data.nerve)[c(-1,-2,-3)], pattern = "\\.", simplify = TRUE)[,2]
+
+# Change ID in metadata
+metadata.nerve$ID <- str_split(metadata.nerve$SUBJID, pattern = "-", simplify = TRUE)[,2]
+metadata.nerve$AGE <- factor(metadata.nerve$AGE)
+
+# Merge data and metadata
+metadata_transfrom.nerve <- merge(x = data.frame(ID = id_data.nerve, Name = colnames(data.nerve)[c(-1,-2,-3)]), y = metadata.nerve, by = "ID", all.x = TRUE)
+rownames(metadata_transfrom.nerve) <- metadata_transfrom.nerve$Name
+```
+
+```{r}
+# Set 20-29 as control
+metadata_transfrom.nerve$AGE <-  relevel(metadata_transfrom.nerve$AGE, ref = '20-29')
+```
+
+## Create DESeq2 object
+
+```{r}
+dds.nerve <- DESeqDataSetFromMatrix(counts.nerve, 
+                              colData = metadata_transfrom.nerve, 
+                              design = ~ AGE)
+```
+
+### QC
+
+```{r}
+# Transform counts for data visualization
+rld.nerve <- rlog(dds.nerve, blind=TRUE)
+
+# Plot PCA
+
+DESeq2::plotPCA(rld.nerve, intgroup = "group_id")
+```
+
+### Run DESeq2
+
+```{r}
+# Run DESeq2 
+dds.nerve <- DESeq(dds.nerve, test = 'LRT', reduced = ~1)
+```
+
+### Results
+
+```{r}
+resultsNames(dds.nerve)
+res.name <- resultsNames(dds.nerve)[-1]
+```
+
+```{r}
+  # Set thresholds to select gene with adjust p < 0.05 and log2FoldChange greater than 1 or less than -1.
+padj_cutoff <- 0.05
+res.list.nerve <- list()
+
+for (i in (res.name)){
+  res <- results(dds.nerve, name = i, test = 'LRT')
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  sig_res <- dplyr::filter(res_tbl, padj < padj_cutoff) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  res.list.nerve[[i]] <- sig_res
+}
+
+```
+
+```{r}
+res.list.nerve
+```
+
+### notch related gene
+
+```{r}
+res.list.notch.nerve <- list()
+for (i in (res.name)){
+  res <- results(dds.nerve, name = i, test = 'LRT')
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  notch_res <- dplyr::filter(res_tbl, str_extract(gene, pattern = '.+(?=\\.)') %in% notch_DNA&padj < padj_cutoff) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  res.list.notch.nerve[[i]] <- notch_res
+}
+```
+
+```{r}
+res.list.notch.nerve
+```
+
+There are 10 genes related to Notch has padj \< 0.05
+
+Translate to gene SYMBOL
+
+```{r}
+res.notch.SYMBOL.nerve <- mapIds(org.Hs.eg.db, keys = str_extract(res.list.notch.nerve[[1]]$gene, pattern = '.+(?=\\.)'), keytype = 'ENSEMBL', column = 'SYMBOL' )
+res.notch.SYMBOL.nerve
+```
+
+#### Notch related proteins
+
+```{r}
+res.list.notch.proteins.nerve <- list()
+for (i in (res.name)){
+  res <- results(dds.nerve, name = i, test = 'LRT') 
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  notch_res <- dplyr::filter(res_tbl, str_extract(gene, pattern = '.+(?=\\.)') %in% notch_protein.ENSEMBL&padj < padj_cutoff) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  res.list.notch.proteins.nerve[[i]] <- notch_res
+}
+```
+```{r}
+res.list.notch.proteins.nerve
+```
+
+
+#### Spearman test on the correlation between age and genes lfc
+
+```{r}
+lfc.nerve = data.frame()
+for (i in (1:11)){
+  for (k in (1:5)){
+    lfc.nerve[i,k] <- as.numeric(res.list.notch.nerve[[k]][i,3])
+  }
+}
+rownames(lfc.nerve) <- res.list.notch.nerve[[1]]$gene
+colnames(lfc.nerve) <- res.name
+
+lfc.nerve['SYMBOL'] <- res.notch.SYMBOL.nerve
+lfc.nerve
+```
+
+```{r}
+cor.test.res.nerve <- data.frame()
+for (i in (1:5)){
+  print(paste(rownames(lfc.nerve)[i],' VS Age'))
+  cor.test.res.nerve[i,1] <- rownames(lfc.nerve)[i] #ENSEMBL
+  cor.test.res.nerve[i,2] <- res.notch.SYMBOL.nerve[i] #SYMBOL
+  res.cor <- cor.test(x = rank(res.name), y = as.numeric(lfc.nerve[i,-6]), method = 'spearman')
+  print(res.cor)
+  cor.test.res.nerve[i,3] <- as.numeric(res.cor[4]) #Rho
+  cor.test.res.nerve[i,4] <- as.numeric(res.cor[3]) #Pvalue
+}
+colnames(cor.test.res.nerve) <- c('ENSEMBL', 'SYMBOL', 'Rho', 'Pvalue')
+```
+
+```{r}
+cor.test.res.nerve = merge(x = lfc.nerve, y = cor.test.res.nerve, by = "SYMBOL")
+```
+
+```{r}
+write.csv(cor.test.res.nerve, file = 'Results/Nerve_tibial/Cor_test_nerve_tibial.csv')
+```
+
+HEY1, NOTCH2, NOTCH3 are negatively related to age.
+
+#### Spearman test for notch proteins
+```{r}
+notch.proteins.SYMBOL.nerve = mapIds(org.Hs.eg.db, keys = str_extract(res.list.notch.proteins.nerve$AGE_30.39_vs_20.29$gene, pattern = '.+(?=\\.)'), keytype = 'ENSEMBL', column = 'SYMBOL' )
+lfc.nerve = data.frame()
+for (i in (1:87)){
+  for (k in (1:5)){
+    lfc.nerve[i,k] <- as.numeric(res.list.notch.proteins.nerve[[k]][i,3])
+  }
+}
+rownames(lfc.nerve) <- res.list.notch.proteins.nerve[[1]]$gene
+colnames(lfc.nerve) <- res.name
+
+lfc.nerve['SYMBOL'] <- notch.proteins.SYMBOL.nerve
+lfc.nerve
+```
+```{r}
+cor.test.res.nerve <- data.frame()
+for (i in (1:87)){
+  print(paste(rownames(lfc.nerve)[i],' VS Age'))
+  cor.test.res.nerve[i,1] <- notch.proteins.SYMBOL.nerve[i] #SYMBOL
+  res.cor <- cor.test(x = rank(res.name), y = as.numeric(lfc.nerve[i,-6]), method = 'spearman')
+  print(res.cor)
+  cor.test.res.nerve[i,2] <- as.numeric(res.cor[4]) #Rho
+  cor.test.res.nerve[i,3] <- as.numeric(res.cor[3]) #Pvalue
+}
+colnames(cor.test.res.nerve) <- c('SYMBOL', 'Rho', 'Pvalue')
+```
+```{r}
+cor.test.res.nerve = merge(x = lfc.nerve, y = cor.test.res.nerve, by = "SYMBOL")
+```
+
+```{r}
+write.csv(cor.test.res.nerve, file = 'Results/Nerve_tibial/Cor_test_res_proteins_nerve_tibial.csv')
+```
+#### Spearman test on the correlation between age and genes expression value
+
+```{r}
+# Get norm conuts
+normalized_counts.nerve <- counts(dds.nerve, normalized = TRUE)
+
+# Get all DEG
+DEGs.nerve = rownames(counts.nerve)
+for (i in res.name){
+  DEGs.nerve <- intersect(DEGs, res.list.nerve[[i]]$gene)
+}
+
+# Get all DEG notch
+DEGs.notch.nerve = rownames(counts.nerve)
+for (i in res.name){
+  DEGs.notch.nerve <- intersect(DEGs.notch.nerve, res.list.notch.nerve[[i]]$gene)
+}
+# Extract normalized counts for only the significant genes
+  sig_norm.nerve <- data.frame(normalized_counts.nerve) %>%
+    rownames_to_column(var = "gene") %>%
+    dplyr::filter(gene %in% DEGs.notch.nerve)
+
+```
+
+```{r}
+arrange(metadata_transfrom.nerve,AGE) %>%
+  select(AGE) -> ann.col.nerve
+mat.nerve <- sig_norm.nerve[ , 2:length(colnames(sig_norm.nerve))]
+#colnames(mat.nerve) <- str_split(colnames(mat.nerve), pattern = "\\.", simplify = TRUE)[,2]
+mat.nerve <- mat.nerve[,rownames(ann.col.nerve)]
+```
+
+```{r}
+df.nerve <- cbind(t(mat.nerve[1,]), ann.col.nerve)
+  colnames(df.nerve) <- c('Expression', 'Age')
+
+ggplot(df.nerve, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.nerve[1,1]) +
+  ggtitle(res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[1,1], pattern = '.+(?=\\.)')])
+
+ggsave(file.path('Results/Nerve_tibial', paste('Barplot_',res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[1,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.nerve[1,1],' VS Age'))
+print(cor.test(rank(df.nerve$Age), y = as.numeric(df.nerve$Expression), method = 'spearman'))
+```
+
+```{r}
+df.nerve <- cbind(t(mat.nerve[2,]), ann.col.nerve)
+  colnames(df.nerve) <- c('Expression', 'Age')
+
+ggplot(df.nerve, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.nerve[2,1]) +
+  ggtitle(res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[2,1], pattern = '.+(?=\\.)')])
+
+ggsave(file.path('Results/Nerve_tibial', paste('Barplot_',res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[2,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.nerve[2,1],' VS Age'))
+print(cor.test(rank(df.nerve$Age), y = as.numeric(df.nerve$Expression), method = 'spearman'))
+```
+
+```{r}
+df.nerve <- cbind(t(mat.nerve[3,]), ann.col.nerve)
+  colnames(df.nerve) <- c('Expression', 'Age')
+
+
+ggplot(df.nerve, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.nerve[3,1]) +
+  ggtitle(res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[3,1], pattern = '.+(?=\\.)')])
+
+ggsave(file.path('Results/Nerve_tibial', paste('Barplot_',res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[3,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.nerve[3,1],' VS Age'))
+print(cor.test(rank(df.nerve$Age), y = as.numeric(df.nerve$Expression), method = 'spearman'))
+```
+
+```{r}
+df.nerve <- cbind(t(mat.nerve[4,]), ann.col.nerve)
+  colnames(df.nerve) <- c('Expression', 'Age')
+
+
+ggplot(df.nerve, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.nerve[4,1]) +
+  ggtitle(res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[4,1], pattern = '.+(?=\\.)')])
+
+ggsave(file.path('Results/Nerve_tibial', paste('Barplot_',res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[4,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.nerve[4,1],' VS Age'))
+print(cor.test(rank(df.nerve$Age), y = as.numeric(df.nerve$Expression), method = 'spearman'))
+```
+
+```{r}
+df.nerve <- cbind(t(mat.nerve[5,]), ann.col.nerve)
+  colnames(df.nerve) <- c('Expression', 'Age')
+
+
+ggplot(df.nerve, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.nerve[5,1]) +
+  ggtitle(res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[5,1], pattern = '.+(?=\\.)')])
+
+ggsave(file.path('Results/Nerve_tibial', paste('Barplot_',res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[5,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.nerve[5,1],' VS Age'))
+print(cor.test(rank(df.nerve$Age), y = as.numeric(df.nerve$Expression), method = 'spearman'))
+```
+
+```{r}
+df.nerve <- cbind(t(mat.nerve[6,]), ann.col.nerve)
+  colnames(df.nerve) <- c('Expression', 'Age')
+
+
+ggplot(df.nerve, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.nerve[6,1]) +
+  ggtitle(res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[6,1], pattern = '.+(?=\\.)')])
+
+ggsave(file.path('Results/Nerve_tibial', paste('Barplot_',res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[6,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.nerve[6,1],' VS Age'))
+print(cor.test(rank(df.nerve$Age), y = as.numeric(df.nerve$Expression), method = 'spearman'))
+```
+
+```{r}
+df.nerve <- cbind(t(mat.nerve[7,]), ann.col.nerve)
+  colnames(df.nerve) <- c('Expression', 'Age')
+
+
+ggplot(df.nerve, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.nerve[7,1]) +
+  ggtitle(res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[7,1], pattern = '.+(?=\\.)')])
+
+ggsave(file.path('Results/Nerve_tibial', paste('Barplot_',res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[7,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.nerve[7,1],' VS Age'))
+print(cor.test(rank(df.nerve$Age), y = as.numeric(df.nerve$Expression), method = 'spearman'))
+```
+
+```{r}
+df.nerve <- cbind(t(mat.nerve[8,]), ann.col.nerve)
+  colnames(df.nerve) <- c('Expression', 'Age')
+
+
+ggplot(df.nerve, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.nerve[8,1]) +
+  ggtitle(res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[8,1], pattern = '.+(?=\\.)')])
+
+ggsave(file.path('Results/Nerve_tibial', paste('Barplot_',res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[8,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.nerve[8,1],' VS Age'))
+print(cor.test(rank(df.nerve$Age), y = as.numeric(df.nerve$Expression), method = 'spearman'))
+```
+
+```{r}
+df.nerve <- cbind(t(mat.nerve[9,]), ann.col.nerve)
+  colnames(df.nerve) <- c('Expression', 'Age')
+
+
+ggplot(df.nerve, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.nerve[9,1]) +
+  ggtitle(res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[9,1], pattern = '.+(?=\\.)')])
+
+ggsave(file.path('Results/Nerve_tibial', paste('Barplot_',res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[9,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.nerve[9,1],' VS Age'))
+print(cor.test(rank(df.nerve$Age), y = as.numeric(df.nerve$Expression), method = 'spearman'))
+```
+
+```{r}
+df.nerve <- cbind(t(mat.nerve[10,]), ann.col.nerve)
+  colnames(df.nerve) <- c('Expression', 'Age')
+
+
+ggplot(df.nerve, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.nerve[10,1]) +
+  ggtitle(res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[10,1], pattern = '.+(?=\\.)')])
+
+ggsave(file.path('Results/Nerve_tibial', paste('Barplot_',res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[10,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.nerve[10,1],' VS Age'))
+print(cor.test(rank(df.nerve$Age), y = as.numeric(df.nerve$Expression), method = 'spearman'))
+```
+
+```{r}
+df.nerve <- cbind(t(mat.nerve[11,]), ann.col.nerve)
+  colnames(df.nerve) <- c('Expression', 'Age')
+
+
+ggplot(df.nerve, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.nerve[11,1]) +
+  ggtitle(res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[11,1], pattern = '.+(?=\\.)')])
+
+ggsave(file.path('Results/Nerve_tibial', paste('Barplot_',res.notch.SYMBOL.nerve[str_extract(sig_norm.nerve[11,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.nerve[11,1],' VS Age'))
+print(cor.test(rank(df.nerve$Age), y = as.numeric(df.nerve$Expression), method = 'spearman'))
+```
+
+
+## skeletal muscle
+
+```{r}
+metadata.skeletal <- read.delim("gene_reads_2017-06-05_v8_skin_sun_exposed_lower_leg.gct/GTEx_Analysis_v8_Annotations_SubjectPhenotypesDS.txt")
+
+data.skeletal <- read.delim('gene_reads_2017-06-05_v8_muscle_skeletal.gct/gene_reads_muscle_skeletal.gct', skip = 2)
+```
+
+```{r}
+counts.skeletal <- data.skeletal[,c(-1,-2,-3)]
+rownames(counts.skeletal) <- data.skeletal$Name
+```
+
+```{r}
+## Each sample is named after GTEX.ID.XXXX. Extract the code after GTEX as ID
+id_data.skeletal <- str_split(colnames(data.skeletal)[c(-1,-2,-3)], pattern = "\\.", simplify = TRUE)[,2]
+
+# Change ID in metadata
+metadata.skeletal$ID <- str_split(metadata.skeletal$SUBJID, pattern = "-", simplify = TRUE)[,2]
+metadata.skeletal$AGE <- factor(metadata.skeletal$AGE)
+
+# Merge data and metadata
+metadata_transfrom.skeletal <- merge(x = data.frame(ID = id_data.skeletal, Name = colnames(data.skeletal)[c(-1,-2,-3)]), y = metadata.skeletal, by = "ID", all.x = TRUE)
+rownames(metadata_transfrom.skeletal) <- metadata_transfrom.skeletal$Name
+```
+
+```{r}
+# Set 20-29 as control
+metadata_transfrom.skeletal$AGE <-  relevel(metadata_transfrom.skeletal$AGE, ref = '20-29')
+```
+
+```{r}
+#png(filename="Metadata_skeletal.png")
+barplot(table(metadata.skeletal$AGE), main="Metadata_skeletal") %>%
+  text(y = table(metadata.skeletal$AGE)-15, labels = table(metadata.skeletal$AGE))
+#dev.off()
+```
+
+## Create DESeq2 object
+
+```{r}
+dds.skeletal <- DESeqDataSetFromMatrix(counts.skeletal, 
+                              colData = metadata_transfrom.skeletal, 
+                              design = ~ AGE)
+```
+
+### QC
+
+```{r}
+# Transform counts for data visualization
+rld.skeletal <- rlog(dds.skeletal, blind=TRUE)
+
+# Plot PCA
+
+DESeq2::plotPCA(rld.skeletal, intgroup = "group_id")
+```
+
+### Run DESeq2
+
+```{r}
+# Run DESeq2 
+dds.skeletal <- DESeq(dds.skeletal, test = 'LRT', reduced = ~1)
+```
+
+### Results
+
+```{r}
+resultsNames(dds.skeletal)
+res.name <- resultsNames(dds.skeletal)[-1]
+```
+
+```{r}
+  # Set thresholds to select gene with adjust p < 0.05 and log2FoldChange greater than 1 or less than -1.
+padj_cutoff <- 0.05
+res.list.skeletal <- list()
+
+for (i in (res.name)){
+  res <- results(dds.skeletal, name = i, test = 'LRT')
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  sig_res <- dplyr::filter(res_tbl, padj < padj_cutoff) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  res.list.skeletal[[i]] <- sig_res
+}
+
+```
+
+```{r}
+res.list.skeletal
+```
+
+```{r}
+
+gene_list.res.skeletal <- list()
+
+for (i in (res.name)){
+  res <- results(dds.skeletal, name = i, test = 'LRT')
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  sig_res <- dplyr::filter(res_tbl, str_extract(gene, pattern = '.+(?=\\.)') %in% gene_list.ENSEMBL) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  gene_list.res.skeletal[[i]] <- sig_res
+}
+```
+
+```{r}
+gene_list.res.skeletal
+```
+
+
+### notch related gene
+
+```{r}
+res.list.notch.skeletal <- list()
+for (i in (res.name)){
+  res <- results(dds.skeletal, name = i, test = 'LRT')
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  notch_res <- dplyr::filter(res_tbl, str_extract(gene, pattern = '.+(?=\\.)') %in% notch_DNA&padj < padj_cutoff) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  res.list.notch.skeletal[[i]] <- notch_res
+}
+```
+
+```{r}
+res.list.notch.skeletal
+```
+
+There are 11 genes related to Notch has padj \< 0.05
+
+Translate to gene SYMBOL
+
+```{r}
+res.notch.SYMBOL.skeletal <- mapIds(org.Hs.eg.db, keys = str_extract(res.list.notch.skeletal[[1]]$gene, pattern = '.+(?=\\.)'), keytype = 'ENSEMBL', column = 'SYMBOL' )
+res.notch.SYMBOL.skeletal
+```
+
+#### Notch related proteins
+
+```{r}
+res.list.notch.proteins.skeletal <- list()
+for (i in (res.name)){
+  res <- results(dds.skeletal, name = i, test = 'LRT') 
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  notch_res <- dplyr::filter(res_tbl, str_extract(gene, pattern = '.+(?=\\.)') %in% notch_protein.ENSEMBL&padj < padj_cutoff) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  res.list.notch.proteins.skeletal[[i]] <- notch_res
+}
+```
+```{r}
+res.list.notch.proteins.skeletal
+```
+#### Spearman test on the correlation between age and genes lfc
+
+```{r}
+lfc.skeletal = data.frame()
+for (i in (1:11)){
+  for (k in (1:5)){
+    lfc.skeletal[i,k] <- as.numeric(res.list.notch.skeletal[[k]][i,3])
+  }
+}
+rownames(lfc.skeletal) <- res.list.notch.skeletal[[1]]$gene
+colnames(lfc.skeletal) <- res.name
+
+lfc.skeletal['SYMBOL'] <- res.notch.SYMBOL.skeletal
+lfc.skeletal
+```
+
+```{r}
+cor.test.res.skeletal <- data.frame()
+for (i in (1:11)){
+  print(paste(rownames(lfc.skeletal)[i],' VS Age'))
+  cor.test.res.skeletal[i,1] <- rownames(lfc.skeletal)[i] #ENSEMBL
+  cor.test.res.skeletal[i,2] <- res.notch.SYMBOL.skeletal[i] #SYMBOL
+  res.cor <- cor.test(x = rank(res.name), y = as.numeric(lfc.skeletal[i,-6]), method = 'spearman')
+  print(res.cor)
+  cor.test.res.skeletal[i,3] <- as.numeric(res.cor[4]) #Rho
+  cor.test.res.skeletal[i,4] <- as.numeric(res.cor[3]) #Pvalue
+}
+colnames(cor.test.res.skeletal) <- c('ENSEMBL', 'SYMBOL', 'Rho', 'Pvalue')
+```
+
+```{r}
+cor.test.res.skeletal = merge(x = lfc.skeletal, y = cor.test.res.skeletal, by = "SYMBOL")
+```
+
+```{r}
+write.csv(cor.test.res.skeletal, file = 'Results/Muscle_skeletal/Cor_test_res_skeletal.csv')
+```
+
+HEY1, NOTCH2, NOTCH3 are negatively related to age.
+
+#### Spearman test for notch proteins
+```{r}
+notch.proteins.SYMBOL.skeletal = mapIds(org.Hs.eg.db, keys = str_extract(res.list.notch.proteins.skeletal$AGE_30.39_vs_20.29$gene, pattern = '.+(?=\\.)'), keytype = 'ENSEMBL', column = 'SYMBOL' )
+lfc.skeletal = data.frame()
+for (i in (1:nrow(res.list.notch.proteins.skeletal[[1]]))){
+  for (k in (1:5)){
+    lfc.skeletal[i,k] <- as.numeric(res.list.notch.proteins.skeletal[[k]][i,3])
+  }
+}
+rownames(lfc.skeletal) <- res.list.notch.proteins.skeletal[[1]]$gene
+colnames(lfc.skeletal) <- res.name
+
+lfc.skeletal['SYMBOL'] <- notch.proteins.SYMBOL.skeletal
+lfc.skeletal
+```
+```{r}
+cor.test.res.skeletal <- data.frame()
+for (i in (1:length(notch.proteins.SYMBOL.skeletal))){
+  print(paste(rownames(lfc.skeletal)[i],' VS Age'))
+  cor.test.res.skeletal[i,1] <- notch.proteins.SYMBOL.skeletal[i] #SYMBOL
+  res.cor <- cor.test(x = rank(res.name), y = as.numeric(lfc.skeletal[i,-6]), method = 'spearman')
+  print(res.cor)
+  cor.test.res.skeletal[i,2] <- as.numeric(res.cor[4]) #Rho
+  cor.test.res.skeletal[i,3] <- as.numeric(res.cor[3]) #Pvalue
+}
+colnames(cor.test.res.skeletal) <- c('SYMBOL', 'Rho', 'Pvalue')
+```
+
+```{r}
+cor.test.res.skeletal = merge(x = lfc.skeletal, y = cor.test.res.skeletal, by = "SYMBOL")
+```
+
+```{r}
+write.csv(cor.test.res.skeletal, file = 'Results/Muscle_skeletal/Cor_test_res_proteins_skeletal.csv')
+```
+
+
+#### Spearman test on the correlation between age and genes expression value
+
+```{r}
+# Get norm conuts
+normalized_counts.skeletal <- counts(dds.skeletal, normalized = TRUE)
+
+# Get all DEG
+DEGs.skeletal = rownames(counts.skeletal)
+for (i in res.name){
+  DEGs.skeletal <- intersect(DEGs, res.list.skeletal[[i]]$gene)
+}
+
+# Get all DEG notch
+DEGs.notch.skeletal = rownames(counts.skeletal)
+for (i in res.name){
+  DEGs.notch.skeletal <- intersect(DEGs.notch.skeletal, res.list.notch.skeletal[[i]]$gene)
+}
+# Extract normalized counts for only the significant genes
+  sig_norm.skeletal <- data.frame(normalized_counts.skeletal) %>%
+    rownames_to_column(var = "gene") %>%
+    dplyr::filter(gene %in% DEGs.notch.skeletal)
+
+```
+
+```{r}
+arrange(metadata_transfrom.skeletal,AGE) %>%
+  select(AGE) -> ann.col.skeletal
+mat.skeletal <- sig_norm.skeletal[ , 2:length(colnames(sig_norm.skeletal))]
+mat.skeletal <- mat.skeletal[,rownames(ann.col.skeletal)]
+```
+
+```{r}
+df.skeletal <- cbind(t(mat.skeletal[1,]), ann.col.skeletal)
+  colnames(df.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman')
+
+ggplot(df.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.skeletal[1,1]) +
+  geom_text(x=1.5, y=3100, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[1,1], pattern = '.+(?=\\.)')], "Skeletal muscle")
+
+ggsave(file.path('Results/Muscle_skeletal', paste('Barplot_',res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[1,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.skeletal[1,1],' VS Age'))
+print(cor.temp)
+```
+
+```{r}
+df.skeletal <- cbind(t(mat.skeletal[2,]), ann.col.skeletal)
+  colnames(df.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman')
+
+ggplot(df.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.skeletal[2,1]) +
+  geom_text(x=5.5, y=6000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[2,1], pattern = '.+(?=\\.)')], "Skeletal muscle")
+
+ggsave(file.path('Results/Muscle_skeletal', paste('Barplot_',res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[2,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.skeletal[2,1],' VS Age'))
+print(cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman'))
+```
+
+```{r}
+df.skeletal <- cbind(t(mat.skeletal[3,]), ann.col.skeletal)
+  colnames(df.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman')
+
+ggplot(df.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.skeletal[3,1]) +
+  geom_text(x=5.5, y=22000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[3,1], pattern = '.+(?=\\.)')], "Skeletal muscle")
+
+ggsave(file.path('Results/Muscle_skeletal', paste('Barplot_',res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[3,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.skeletal[3,1],' VS Age'))
+print(cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman'))
+```
+
+```{r}
+df.skeletal <- cbind(t(mat.skeletal[4,]), ann.col.skeletal)
+  colnames(df.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman')
+
+ggplot(df.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.skeletal[4,1]) +
+  geom_text(x=1.5, y=6000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[4,1], pattern = '.+(?=\\.)')], "Skeletal muscle")
+
+ggsave(file.path('Results/Muscle_skeletal', paste('Barplot_',res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[4,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.skeletal[4,1],' VS Age'))
+print(cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman'))
+```
+
+```{r}
+df.skeletal <- cbind(t(mat.skeletal[5,]), ann.col.skeletal)
+  colnames(df.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman')
+
+ggplot(df.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.skeletal[5,1]) +
+  geom_text(x=5.5, y=15000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[5,1], pattern = '.+(?=\\.)')], "Skeletal muscle")
+
+ggsave(file.path('Results/Muscle_skeletal', paste('Barplot_',res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[5,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.skeletal[5,1],' VS Age'))
+print(cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman'))
+```
+```{r}
+df.skeletal <- cbind(t(mat.skeletal[6,]), ann.col.skeletal)
+  colnames(df.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman')
+
+ggplot(df.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.skeletal[6,1]) +
+  geom_text(x=5.5, y=500, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[6,1], pattern = '.+(?=\\.)')], "Skeletal muscle")
+
+ggsave(file.path('Results/Muscle_skeletal', paste('Barplot_',res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[6,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.skeletal[6,1],' VS Age'))
+print(cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman'))
+```
+```{r}
+df.skeletal <- cbind(t(mat.skeletal[7,]), ann.col.skeletal)
+  colnames(df.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman')
+
+ggplot(df.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.skeletal[7,1]) +
+  geom_text(x=5.5, y=6000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[7,1], pattern = '.+(?=\\.)')], "Skeletal muscle")
+
+ggsave(file.path('Results/Muscle_skeletal', paste('Barplot_',res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[7,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.skeletal[7,1],' VS Age'))
+print(cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman'))
+```
+```{r}
+df.skeletal <- cbind(t(mat.skeletal[8,]), ann.col.skeletal)
+  colnames(df.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman')
+
+ggplot(df.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.skeletal[8,1]) +
+  geom_text(x=5.5, y=60000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[8,1], pattern = '.+(?=\\.)')], "Skeletal muscle")
+
+ggsave(file.path('Results/Muscle_skeletal', paste('Barplot_',res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[8,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.skeletal[8,1],' VS Age'))
+print(cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman'))
+```
+```{r}
+df.skeletal <- cbind(t(mat.skeletal[9,]), ann.col.skeletal)
+  colnames(df.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman')
+
+ggplot(df.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.skeletal[9,1]) +
+  geom_text(x=5.5, y=100, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[9,1], pattern = '.+(?=\\.)')], "Skeletal muscle")
+
+ggsave(file.path('Results/Muscle_skeletal', paste('Barplot_',res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[9,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.skeletal[9,1],' VS Age'))
+print(cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman'))
+```
+```{r}
+df.skeletal <- cbind(t(mat.skeletal[10,]), ann.col.skeletal)
+  colnames(df.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman')
+
+ggplot(df.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.skeletal[10,1]) +
+  geom_text(x=5.5, y=200, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[10,1], pattern = '.+(?=\\.)')], "Skeletal muscle")
+
+ggsave(file.path('Results/Muscle_skeletal', paste('Barplot_',res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[10,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.skeletal[10,1],' VS Age'))
+print(cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman'))
+```
+```{r}
+df.skeletal <- cbind(t(mat.skeletal[11,]), ann.col.skeletal)
+  colnames(df.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman')
+
+ggplot(df.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+    ggtitle(sig_norm.skeletal[11,1]) +
+  geom_text(x=5.5, y=23000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[11,1], pattern = '.+(?=\\.)')], "Skeletal muscle")
+
+ggsave(file.path('Results/Muscle_skeletal', paste('Barplot_',res.notch.SYMBOL.skeletal[str_extract(sig_norm.skeletal[11,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.skeletal[11,1],' VS Age'))
+print(cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman'))
+```
+#### Boxplot for protein
+
+```{r}
+DEGs.notch.proteins.skeletal = rownames(counts.skeletal)
+for (i in res.name){
+  DEGs.notch.proteins.skeletal <- intersect(DEGs.notch.proteins.skeletal, res.list.notch.proteins.skeletal[[i]]$gene)
+}
+
+sig_norm.proteins.skeletal <- data.frame(normalized_counts.skeletal) %>%
+    rownames_to_column(var = "gene") %>%
+    dplyr::filter(gene %in% DEGs.notch.proteins.skeletal)
+
+mat.proteins.skeletal <- sig_norm.proteins.skeletal[ , 2:length(colnames(sig_norm.proteins.skeletal))]
+mat.proteins.skeletal <- mat.proteins.skeletal[,rownames(ann.col.skeletal)]
+```
+
+```{r}
+# Find target's index
+target = 'FURIN'
+i = which(notch.proteins.SYMBOL.skeletal==target)
+i = names(notch.proteins.SYMBOL.skeletal)[i]
+i = which(str_extract(sig_norm.proteins.skeletal[,1], pattern = '.+(?=\\.)')==i)
+
+df.skeletal <- cbind(t(mat.proteins.skeletal[i,]), ann.col.skeletal)
+  colnames(df.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman')
+  
+ggplot(df.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+  geom_text(x=5.5, y=20000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(notch.proteins.SYMBOL.skeletal[str_extract(sig_norm.proteins.skeletal[i,1], pattern = '.+(?=\\.)')],  "Skeletal muscle")
+
+ggsave(file.path('Results/Muscle_skeletal', paste('Barplot_',notch.proteins.SYMBOL.skeletal[str_extract(sig_norm.proteins.skeletal[i,1], pattern = '.+(?=\\.)')],'.png', sep = '')))
+
+print(paste(sig_norm.proteins.skeletal[i,1],' VS Age'))
+print(cor.temp)
+```
+
+```{r}
+DEGs.gene.skeletal = rownames(counts.skeletal)
+for (i in res.name){
+  DEGs.gene.skeletal <- intersect(DEGs.gene.skeletal, gene_list.res.skeletal[[i]]$gene)
+}
+
+sig_norm.gene.skeletal <- data.frame(normalized_counts.skeletal) %>%
+    rownames_to_column(var = "gene") %>%
+    dplyr::filter(gene %in% DEGs.gene.skeletal)
+
+mat.gene.skeletal <- sig_norm.gene.skeletal[ , 2:length(colnames(sig_norm.gene.skeletal))]
+mat.gene.skeletal <- mat.gene.skeletal[,rownames(ann.col.skeletal)]
+```
+
+```{r}
+# Find target's index
+target = 'CDH15'
+i = which(str_extract(sig_norm.gene.skeletal[,1], pattern = '.+(?=\\.)')==gene_list.ENSEMBL[target])
+
+df.skeletal <- cbind(t(mat.gene.skeletal[i,]), ann.col.skeletal)
+  colnames(df.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman')
+  
+ggplot(df.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+  geom_text(x=5.5, y=12000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)))+
+  ggtitle(target,  "Skeletal muscle")
+
+ggsave(file.path('Results/Muscle_skeletal', paste('Barplot_',target,'.png', sep = '')))
+
+#print(paste(sig_norm.proteins.skeletal[i,1],' VS Age'))
+print(cor.temp)
+```
+```{r}
+dfff = DataFrame()
+for (k in (1:length(gene_list))){
+  target = gene_list[k]
+  i = which(str_extract(sig_norm.gene.skeletal[,1], pattern = '.+(?=\\.)')==gene_list.ENSEMBL[target])
+  
+  df.skeletal <- cbind(t(mat.gene.skeletal[i,]), ann.col.skeletal)
+  colnames(df.skeletal) <- c('Expression', 'Age')
+  cor.temp = cor.test(rank(df.skeletal$Age), y = as.numeric(df.skeletal$Expression), method = 'spearman')
+  
+  dfff[k,1] = target
+  dfff[k,2] = signif(cor.temp$estimate,3)
+  dfff[k,3] = signif(cor.temp$p.value,3)
+}
+```
+
+```{r}
+X = 'NOTCH2'
+Y = 'FURIN'
+x = which(notch.proteins.SYMBOL.skeletal==X)
+x = names(notch.proteins.SYMBOL.skeletal)[x]
+x = which(str_extract(sig_norm.proteins.skeletal[,1], pattern = '.+(?=\\.)')==x)
+
+y = which(notch.proteins.SYMBOL.skeletal==Y)
+y = names(notch.proteins.SYMBOL.skeletal)[y]
+y = which(str_extract(sig_norm.proteins.skeletal[,1], pattern = '.+(?=\\.)')==y)
+
+x_y = cbind(t(mat.proteins.skeletal[c(x,y),]), ann.col.skeletal)
+colnames(x_y) <- c(X, Y,'Age')
+
+cor.temp = cor.test(x = x_y[[X]] , y = x_y[[Y]], method = 'pearson')
+
+ggplot(x_y, aes_string(x=X, y=Y)) +
+    geom_smooth()+
+  geom_point(size = 1, alpha = 1, aes(color = Age))+
+  #coord_cartesian(xlim = c(9000, 30000))+
+  geom_text(x=21000, y=25000, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  scale_color_nilou(reverse = TRUE)+
+  ggtitle(paste(X,' VS ', Y), "Skeletal muscle")
+
+ggsave(file.path('Results/Muscle_skeletal', paste(X,' vs ', Y, '.png', sep = '')))
+
+print(paste(X,' vs ', Y))
+print(cor.temp)
+```
+
+
+## V10 data
+
+```{r}
+metadata.v10 <- read.delim("V10/GTEx_Analysis_v10_Annotations_SubjectPhenotypesDS.txt")
+
+data.v10.leg <- read.delim('V10/gene_tpm_v10_skin_sun_exposed_lower_leg.gct/gene_tpm_2022-06-06_v10_skin_sun_exposed_lower_leg.gct', skip = 2)
+```
+
+```{r}
+#png(filename="Metadata_v10.png")
+barplot(table(metadata.v10$AGE), main="Metadata_v10") %>%
+  text(y = table(metadata.v10$AGE)-15, labels = table(metadata.v10$AGE))
+#dev.off()
+```
+```{r}
+counts.v10.leg <- data.v10.leg[,c(-1,-2,-3)]
+rownames(counts.v10.leg) <- data.v10.leg$Name
+```
+
+```{r}
+## Each sample is named after GTEX.ID.XXXX. Extract the code after GTEX as ID
+id_data.v10.leg <- str_split(colnames(data.v10.leg)[c(-1,-2,-3)], pattern = "\\.", simplify = TRUE)[,2]
+
+# Change ID in metadata
+metadata.v10$ID <- str_split(metadata.v10$SUBJID, pattern = "-", simplify = TRUE)[,2]
+metadata.v10$AGE <- factor(metadata.v10$AGE)
+
+# Merge data and metadata
+metadata_transfrom.v10 <- merge(x = data.frame(ID = id_data.v10.leg, Name = colnames(data.v10.leg)[c(-1,-2,-3)]), y = metadata.v10, by = "ID", all.x = TRUE)
+rownames(metadata_transfrom.v10) <- metadata_transfrom.v10$Name
+```
+
+```{r}
+# Set 20-29 as control
+metadata_transfrom.v10$AGE <-  relevel(metadata_transfrom.v10$AGE, ref = '20-29')
+```
+
+## Create DESeq2 object
+
+```{r}
+dds.v10.leg <- DESeqDataSetFromMatrix(round(counts.v10.leg), 
+                              colData = metadata_transfrom.v10, 
+                              design = ~ AGE)
+```
+
+
+## Run DESeq2
+
+```{r}
+# Run DESeq2 
+dds.v10.leg <- DESeq(dds.v10.leg, test = 'LRT', reduced = ~1)
+```
+### Results
+
+```{r}
+resultsNames(dds.v10.leg)
+res.name <- resultsNames(dds.v10.leg)[-1]
+```
+
+
+### notch related gene
+
+```{r}
+res.list.notch.v10.leg <- list()
+for (i in (res.name)){
+  res <- results(dds.v10.leg, name = i, test = 'LRT')
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  notch_res <- dplyr::filter(res_tbl, str_extract(gene, pattern = '.+(?=\\.)') %in% notch_gene$converted_alias&padj < 0.001) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  res.list.notch.v10.leg[[i]] <- notch_res
+}
+```
+
+```{r}
+res.list.notch.v10.leg
+```
+```{r}
+GO_result.v10.leg <- list()
+GO_table.v10.leg <- list()
+universal.ENSEMBL <- str_extract(rownames(counts), pattern = '.+(?=\\.)')
+
+res.ENSEMBL <-  str_extract(unlist(res.list.notch.v10.leg[[1]]$gene), pattern = '.+(?=\\.)')
+  
+  ## GO analysis
+GO_result.v10.leg <- enrichGO(res.ENSEMBL, org.Hs.eg.db, keyType = "ENSEMBL", ont = 'BP', universe = universal.ENSEMBL)
+GO_table.v10.leg <- as.data.frame(GO_result.v10.leg)
+```
+```{r}
+GO_table.v10.leg 
+```
+
+
+
+```{r}
+res.notch.SYMBOL.v10.leg <- mapIds(org.Hs.eg.db, keys = str_extract(res.list.notch.v10.leg[[1]]$gene, pattern = '.+(?=\\.)'), keytype = 'ENSEMBL', column = 'SYMBOL' )
+res.notch.SYMBOL.v10.leg
+```
+
+```{r}
+lfc.v10.leg = data.frame()
+for (i in (1:length(res.notch.SYMBOL.v10.leg))){
+  for (k in (1:5)){
+    lfc.v10.leg[i,k] <- as.numeric(res.list.notch.v10.leg[[k]][i,3])
+  }
+}
+rownames(lfc.v10.leg) <- res.list.notch.v10.leg[[1]]$gene
+colnames(lfc.v10.leg) <- res.name
+
+lfc.v10.leg['SYMBOL'] <- res.notch.SYMBOL.v10.leg
+lfc.v10.leg
+```
+
+
+```{r}
+cor.test.res.v10.leg <- data.frame()
+for (i in (1:length(res.notch.SYMBOL.v10.leg))){
+  print(paste(rownames(lfc.v10.leg)[i],' VS Age'))
+  cor.test.res.v10.leg[i,1] <- rownames(lfc.v10.leg)[i] #ENSEMBL
+  cor.test.res.v10.leg[i,2] <- res.notch.SYMBOL.v10.leg[i] #SYMBOL
+  res.cor <- cor.test(x = rank(res.name), y = as.numeric(lfc.v10.leg[i,-6]), method = 'spearman')
+  print(res.cor)
+  cor.test.res.v10.leg[i,3] <- as.numeric(res.cor[4]) #Rho
+  cor.test.res.v10.leg[i,4] <- as.numeric(res.cor[3]) #Pvalue
+}
+colnames(cor.test.res.v10.leg) <- c('ENSEMBL', 'SYMBOL', 'Rho', 'Pvalue')
+```
+```{r}
+cor.test.res.v10.leg = merge(x = lfc.v10.leg, y = cor.test.res.v10.leg, by = "SYMBOL")
+```
+
+```{r}
+write.csv(cor.test.res.v10.leg, file = 'Results/V10/Skin_lower_leg/Cor_test_res_v10_leg_tpm.csv')
+```
+
+
+#### Spearman test on the correlation between age and genes expression value
+```{r}
+normalized_counts.v10.leg <- counts(dds.v10.leg, normalized = TRUE)
+
+DEGs.notch.v10.leg = rownames(counts.v10.leg)
+for (i in res.name){
+  DEGs.notch.v10.leg <- intersect(DEGs.notch.v10.leg, res.list.notch.v10.leg[[i]]$gene)
+}
+
+sig_norm.v10.leg <- data.frame(normalized_counts.v10.leg) %>%
+    rownames_to_column(var = "gene") %>%
+    dplyr::filter(gene %in% DEGs.notch.v10.leg)
+
+arrange(metadata_transfrom.v10,AGE) %>%
+  select(AGE) -> ann.col.v10.leg
+
+mat.v10.leg <- sig_norm.v10.leg[ , 2:length(colnames(sig_norm.v10.leg))]
+mat.v10.leg <- mat.v10.leg[,rownames(ann.col.v10.leg)]
+```
+
+```{r}
+cor.test.res.v10.leg <- data.frame()
+for (i in (1:length(res.notch.SYMBOL.v10.leg))){
+  target = res.notch.SYMBOL.v10.leg[i]
+  id = names(res.notch.SYMBOL.v10.leg)[i]
+  loc = which(str_extract(sig_norm.v10.leg[,1], pattern = '.+(?=\\.)')==id)
+  cor.test.res.v10.leg[i,1] <- id #ENSEMBL
+  cor.test.res.v10.leg[i,2] <- target #SYMBOL
+  
+  df.v10.leg <- cbind(t(mat.v10.leg[loc,]), ann.col.v10.leg)
+  colnames(df.v10.leg) <- c('Expression', 'Age')
+  cor.temp = cor.test(rank(df.v10.leg$Age), y = as.numeric(df.v10.leg$Expression), method = 'spearman')
+
+  cor.test.res.v10.leg[i,3] <- as.numeric(cor.temp[4]) #Rho
+  cor.test.res.v10.leg[i,4] <- as.numeric(cor.temp[3]) #Pvalue
+}
+colnames(cor.test.res.v10.leg) <- c('ENSEMBL', 'SYMBOL', 'Rho', 'Pvalue')
+```
+```{r}
+cor.test.res.v10.leg
+```
+
+
+```{r}
+# up
+up_list = cor.test.res.v10.leg$ENSEMBL[cor.test.res.v10.leg$Rho>0.2]
+GO_result.v10.leg <- list()
+GO_table.v10.leg <- list()
+#universal.ENSEMBL <- str_extract(rownames(counts), pattern = '.+(?=\\.)')
+
+res.ENSEMBL <-  unlist(up_list)
+  
+  ## GO analysis
+GO_result.v10.leg.up <- enrichGO(res.ENSEMBL, org.Hs.eg.db, keyType = "ENSEMBL", ont = 'BP', universe = universal.ENSEMBL)
+GO_table.v10.leg.up <- as.data.frame(GO_result.v10.leg.up)
+
+
+# Down
+down_list = cor.test.res.v10.leg$ENSEMBL[cor.test.res.v10.leg$Rho<(-0.2)]
+GO_result.v10.leg <- list()
+GO_table.v10.leg <- list()
+#universal.ENSEMBL <- str_extract(rownames(counts), pattern = '.+(?=\\.)')
+
+res.ENSEMBL <-  unlist(down_list)
+  
+  ## GO analysis
+GO_result.v10.leg.down <- enrichGO(res.ENSEMBL, org.Hs.eg.db, keyType = "ENSEMBL", ont = 'BP', universe = universal.ENSEMBL)
+GO_table.v10.leg.down <- as.data.frame(GO_result.v10.leg.down)
+```
+```{r}
+GO_table.v10.leg.down
+```
+```{r}
+mutate(GO_result.v10.leg.down, logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = 'Skin_Down',
+               x = 'logP',
+             add = TRUE)
+```
+
+```{r}
+GO_table.v10.leg.up
+```
+```{r}
+mutate(GO_result.v10.leg.up, logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 10, 
+               font.size = 10,
+           title = 'Skin_Up',
+               x = 'logP',
+             add = TRUE)
+```
+
+```{r}
+# Find target's index
+target = 'FURIN'
+i = which(res.notch.SYMBOL.v10.leg==target)
+i = names(res.notch.SYMBOL.v10.leg)[i]
+i = which(str_extract(sig_norm.v10.leg[,1], pattern = '.+(?=\\.)')==i)
+
+df.v10.leg <- cbind(t(mat.v10.leg[i,]), ann.col.v10.leg)
+  colnames(df.v10.leg) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.v10.leg$Age), y = as.numeric(df.v10.leg$Expression), method = 'spearman')
+  
+ggplot(df.v10.leg, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+  geom_text(x=5.5, y=250, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.v10.leg[str_extract(sig_norm.v10.leg[i,1], pattern = '.+(?=\\.)')],  "Lower leg (V10)")
+
+ggsave(file.path('Results/V10/Skin_lower_leg', paste('Barplot_',res.notch.SYMBOL.v10.leg[str_extract(sig_norm.v10.leg[i,1], pattern = '.+(?=\\.)')],'_tmp.png', sep = '')))
+
+print(paste(sig_norm.v10.leg[i,1],' VS Age'))
+print(cor.temp)
+```
+```{r}
+# Find target's index
+target = 'NOTCH2'
+i = which(res.notch.SYMBOL.v10.leg==target)
+i = names(res.notch.SYMBOL.v10.leg)[i]
+i = which(str_extract(sig_norm.v10.leg[,1], pattern = '.+(?=\\.)')==i)
+
+df.v10.leg <- cbind(t(mat.v10.leg[i,]), ann.col.v10.leg)
+  colnames(df.v10.leg) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.v10.leg$Age), y = as.numeric(df.v10.leg$Expression), method = 'spearman')
+  
+ggplot(df.v10.leg, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+  geom_text(x=5.5, y=70, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.v10.leg[str_extract(sig_norm.v10.leg[i,1], pattern = '.+(?=\\.)')],  "Lower leg (V10)")
+
+ggsave(file.path('Results/V10/Skin_lower_leg', paste('Barplot_',res.notch.SYMBOL.v10.leg[str_extract(sig_norm.v10.leg[i,1], pattern = '.+(?=\\.)')],'_tpm.png', sep = '')))
+
+print(paste(sig_norm.v10.leg[i,1],' VS Age'))
+print(cor.temp)
+```
+
+```{r}
+# Find target's index
+target = 'NOTCH3'
+i = which(res.notch.SYMBOL.v10.leg==target)
+i = names(res.notch.SYMBOL.v10.leg)[i]
+i = which(str_extract(sig_norm.v10.leg[,1], pattern = '.+(?=\\.)')==i)
+
+df.v10.leg <- cbind(t(mat.v10.leg[i,]), ann.col.v10.leg)
+  colnames(df.v10.leg) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.v10.leg$Age), y = as.numeric(df.v10.leg$Expression), method = 'spearman')
+  
+ggplot(df.v10.leg, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+  geom_text(x=5.5, y=300, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.v10.leg[str_extract(sig_norm.v10.leg[i,1], pattern = '.+(?=\\.)')],  "Lower leg (V10)")
+
+ggsave(file.path('Results/V10/Skin_lower_leg', paste('Barplot_',res.notch.SYMBOL.v10.leg[str_extract(sig_norm.v10.leg[i,1], pattern = '.+(?=\\.)')],'_tpm.png', sep = '')))
+
+print(paste(sig_norm.v10.leg[i,1],' VS Age'))
+print(cor.temp)
+```
+
+
+
+
+
+
+```{r}
+metadata.v10 <- read.delim("V10/GTEx_Analysis_v10_Annotations_SubjectPhenotypesDS.txt")
+
+data.v10.skeletal <- read.delim('V10/gene_tpm_v10_muscle_skeletal.gct/gene_tpm_2022-06-06_v10_muscle_skeletal.gct', skip = 2)
+
+```
+
+```{r}
+#png(filename="Metadata_v10.png")
+barplot(table(metadata.v10$AGE), main="Metadata_v10") %>%
+  text(y = table(metadata.v10$AGE)-15, labels = table(metadata.v10$AGE))
+#dev.off()
+```
+```{r}
+counts.v10.skeletal <- data.v10.skeletal[,c(-1,-2,-3)]
+rownames(counts.v10.skeletal) <- data.v10.skeletal$Name
+```
+
+```{r}
+## Each sample is named after GTEX.ID.XXXX. Extract the code after GTEX as ID
+id_data.v10.skeletal <- str_split(colnames(data.v10.skeletal)[c(-1,-2,-3)], pattern = "\\.", simplify = TRUE)[,2]
+
+# Change ID in metadata
+metadata.v10$ID <- str_split(metadata.v10$SUBJID, pattern = "-", simplify = TRUE)[,2]
+metadata.v10$AGE <- factor(metadata.v10$AGE)
+
+# Merge data and metadata
+metadata_transfrom.v10 <- merge(x = data.frame(ID = id_data.v10.skeletal, Name = colnames(data.v10.skeletal)[c(-1,-2,-3)]), y = metadata.v10, by = "ID", all.x = TRUE)
+rownames(metadata_transfrom.v10) <- metadata_transfrom.v10$Name
+```
+
+```{r}
+# Set 20-29 as control
+metadata_transfrom.v10$AGE <-  relevel(metadata_transfrom.v10$AGE, ref = '20-29')
+```
+
+## Create DESeq2 object
+
+```{r}
+dds.v10.skeletal <- DESeqDataSetFromMatrix(round(counts.v10.skeletal), 
+                              colData = metadata_transfrom.v10, 
+                              design = ~ AGE)
+```
+
+
+## Run DESeq2
+
+```{r}
+# Run DESeq2 
+dds.v10.skeletal <- DESeq(dds.v10.skeletal, test = 'LRT', reduced = ~1)
+```
+### Results
+
+```{r}
+resultsNames(dds.v10.skeletal)
+res.name <- resultsNames(dds.v10.skeletal)[-1]
+```
+
+
+### notch related gene
+
+```{r}
+res.list.notch.v10.skeletal <- list()
+for (i in (res.name)){
+  res <- results(dds.v10.skeletal, name = i, test = 'LRT')
+  # Turn the results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+        data.frame() %>%
+        rownames_to_column(var="gene") %>%
+        as_tibble()
+
+  # Subset the significant results
+  notch_res <- dplyr::filter(res_tbl, str_extract(gene, pattern = '.+(?=\\.)') %in% notch_gene$converted_alias&padj < 0.001) %>%
+        dplyr::arrange(padj)
+  
+  # Save DEG
+  res.list.notch.v10.skeletal[[i]] <- notch_res
+}
+```
+
+```{r}
+res.list.notch.v10.skeletal
+```
+
+```{r}
+res.notch.SYMBOL.v10.skeletal <- mapIds(org.Hs.eg.db, keys = str_extract(res.list.notch.v10.skeletal[[1]]$gene, pattern = '.+(?=\\.)'), keytype = 'ENSEMBL', column = 'SYMBOL' )
+res.notch.SYMBOL.v10.skeletal
+```
+```{r}
+GO_result.v10.skeletal <- list()
+GO_table.v10.skeletal <- list()
+universal.ENSEMBL <- str_extract(rownames(counts), pattern = '.+(?=\\.)')
+
+for (i in res.name){
+  ## Extract ENSEMBL ID from gene names
+  res.ENSEMBL <-  str_extract(unlist(res.list.notch.v10.skeletal[[i]]$gene), pattern = '.+(?=\\.)')
+  
+  ## GO analysis
+  GO_result.v10.skeletal[[i]] <- enrichGO(res.ENSEMBL, org.Hs.eg.db, keyType = "ENSEMBL", ont = 'BP', universe = universal.ENSEMBL)
+  GO_table.v10.skeletal[[i]] <- as.data.frame(GO_result.v10.skeletal[[i]])
+}
+```
+```{r}
+GO_table.v10.skeletal
+```
+
+
+```{r}
+lfc.v10.skeletal = data.frame()
+for (i in (1:length(res.notch.SYMBOL.v10.skeletal))){
+  for (k in (1:5)){
+    lfc.v10.skeletal[i,k] <- as.numeric(res.list.notch.v10.skeletal[[k]][i,3])
+  }
+}
+rownames(lfc.v10.skeletal) <- res.list.notch.v10.skeletal[[1]]$gene
+colnames(lfc.v10.skeletal) <- res.name
+
+lfc.v10.skeletal['SYMBOL'] <- res.notch.SYMBOL.v10.skeletal
+lfc.v10.skeletal
+```
+
+
+```{r}
+cor.test.res.v10.skeletal <- data.frame()
+for (i in (1:length(res.notch.SYMBOL.v10.skeletal))){
+  print(paste(rownames(lfc.v10.skeletal)[i],' VS Age'))
+  cor.test.res.v10.skeletal[i,1] <- rownames(lfc.v10.skeletal)[i] #ENSEMBL
+  cor.test.res.v10.skeletal[i,2] <- res.notch.SYMBOL.v10.skeletal[i] #SYMBOL
+  res.cor <- cor.test(x = rank(res.name), y = as.numeric(lfc.v10.skeletal[i,-6]), method = 'spearman')
+  print(res.cor)
+  cor.test.res.v10.skeletal[i,3] <- as.numeric(res.cor[4]) #Rho
+  cor.test.res.v10.skeletal[i,4] <- as.numeric(res.cor[3]) #Pvalue
+}
+colnames(cor.test.res.v10.skeletal) <- c('ENSEMBL', 'SYMBOL', 'Rho', 'Pvalue')
+```
+```{r}
+cor.test.res.v10.skeletal = merge(x = lfc.v10.skeletal, y = cor.test.res.v10.skeletal, by = "SYMBOL")
+```
+
+```{r}
+write.csv(cor.test.res.v10.skeletal, file = 'Results/V10/Muscle_skeletal/Cor_test_res_v10_skeletal_tpm.csv')
+```
+
+#### Spearman test on the correlation between age and genes expression value
+```{r}
+normalized_counts.v10.skeletal <- counts(dds.v10.skeletal, normalized = TRUE)
+
+DEGs.notch.v10.skeletal = rownames(counts.v10.skeletal)
+for (i in res.name){
+  DEGs.notch.v10.skeletal <- intersect(DEGs.notch.v10.skeletal, res.list.notch.v10.skeletal[[i]]$gene)
+}
+
+sig_norm.v10.skeletal <- data.frame(normalized_counts.v10.skeletal) %>%
+    rownames_to_column(var = "gene") %>%
+    dplyr::filter(gene %in% DEGs.notch.v10.skeletal)
+
+arrange(metadata_transfrom.v10,AGE) %>%
+  select(AGE) -> ann.col.v10.skeletal
+
+mat.v10.skeletal <- sig_norm.v10.skeletal[ , 2:length(colnames(sig_norm.v10.skeletal))]
+mat.v10.skeletal <- mat.v10.skeletal[,rownames(ann.col.v10.skeletal)]
+```
+
+```{r}
+cor.test.res.v10.skeletal <- data.frame()
+for (i in (1:length(res.notch.SYMBOL.v10.skeletal))){
+  target = res.notch.SYMBOL.v10.skeletal[i]
+  id = names(res.notch.SYMBOL.v10.skeletal)[i]
+  loc = which(str_extract(sig_norm.v10.skeletal[,1], pattern = '.+(?=\\.)')==id)
+  cor.test.res.v10.skeletal[i,1] <- id #ENSEMBL
+  cor.test.res.v10.skeletal[i,2] <- target #SYMBOL
+  
+  df.v10.skeletal <- cbind(t(mat.v10.skeletal[loc,]), ann.col.v10.skeletal)
+  colnames(df.v10.skeletal) <- c('Expression', 'Age')
+  cor.temp = cor.test(rank(df.v10.skeletal$Age), y = as.numeric(df.v10.skeletal$Expression), method = 'spearman')
+
+  cor.test.res.v10.skeletal[i,3] <- as.numeric(cor.temp[4]) #Rho
+  cor.test.res.v10.skeletal[i,4] <- as.numeric(cor.temp[3]) #Pvalue
+}
+colnames(cor.test.res.v10.skeletal) <- c('ENSEMBL', 'SYMBOL', 'Rho', 'Pvalue')
+```
+```{r}
+cor.test.res.v10.skeletal
+```
+
+
+```{r}
+# up
+up_list = cor.test.res.v10.skeletal$ENSEMBL[cor.test.res.v10.skeletal$Rho>0.2]
+GO_result.v10.skeletal <- list()
+GO_table.v10.skeletal <- list()
+#universal.ENSEMBL <- str_extract(rownames(counts), pattern = '.+(?=\\.)')
+
+res.ENSEMBL <-  unlist(up_list)
+  
+  ## GO analysis
+GO_result.v10.skeletal.up <- enrichGO(res.ENSEMBL, org.Hs.eg.db, keyType = "ENSEMBL", ont = 'BP', universe = universal.ENSEMBL)
+GO_table.v10.skeletal.up <- as.data.frame(GO_result.v10.skeletal.up)
+
+
+# Down
+down_list = cor.test.res.v10.skeletal$ENSEMBL[cor.test.res.v10.skeletal$Rho<(-0.2)]
+GO_result.v10.skeletal <- list()
+GO_table.v10.skeletal <- list()
+
+res.ENSEMBL <-  unlist(down_list)
+  
+  ## GO analysis
+GO_result.v10.skeletal.down <- enrichGO(res.ENSEMBL, org.Hs.eg.db, keyType = "ENSEMBL", ont = 'BP', universe = universal.ENSEMBL)
+GO_table.v10.skeletal.down <- as.data.frame(GO_result.v10.skeletal.down)
+```
+```{r}
+GO_table.v10.skeletal.down
+```
+```{r}
+mutate(GO_result.v10.skeletal.down, logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 15, 
+               font.size = 8,
+           title = 'Skeletal_down',
+               x = 'logP',
+             add = TRUE)
+```
+
+
+```{r}
+mutate(GO_result.v10.skeletal.up, logP = -log(p.adjust, base=10)) %>%
+  barplot( drop = TRUE, 
+               showCategory = 15, 
+               font.size = 8,
+           title = 'Skeletal_up',
+               x = 'logP',
+             add = TRUE)
+```
+```{r}
+GO_table.v10.skeletal.up
+```
+
+
+```{r}
+merge(cor.test.res.v10.skeletal, cor.test.res.v10.leg, by = 'SYMBOL', all = FALSE)
+```
+
+
+```{r}
+# Find target's index
+target = 'FURIN'
+i = which(res.notch.SYMBOL.v10.skeletal==target)
+i = names(res.notch.SYMBOL.v10.skeletal)[i]
+i = which(str_extract(sig_norm.v10.skeletal[,1], pattern = '.+(?=\\.)')==i)
+
+df.v10.skeletal <- cbind(t(mat.v10.skeletal[i,]), ann.col.v10.skeletal)
+  colnames(df.v10.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.v10.skeletal$Age), y = as.numeric(df.v10.skeletal$Expression), method = 'spearman')
+  
+ggplot(df.v10.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+  geom_text(x=5.5, y=120, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.v10.skeletal[str_extract(sig_norm.v10.skeletal[i,1], pattern = '.+(?=\\.)')],  "skeletal (V10)")
+
+ggsave(file.path('Results/V10/Muscle_skeletal', paste('Barplot_',res.notch.SYMBOL.v10.skeletal[str_extract(sig_norm.v10.skeletal[i,1], pattern = '.+(?=\\.)')],'_tpm.png', sep = '')))
+
+print(paste(sig_norm.v10.skeletal[i,1],' VS Age'))
+print(cor.temp)
+```
+```{r}
+# Find target's index
+target = 'GZMB'
+i = which(res.notch.SYMBOL.v10.skeletal==target)
+i = names(res.notch.SYMBOL.v10.skeletal)[i]
+i = which(str_extract(sig_norm.v10.skeletal[,1], pattern = '.+(?=\\.)')==i)
+
+df.v10.skeletal <- cbind(t(mat.v10.skeletal[i,]), ann.col.v10.skeletal)
+  colnames(df.v10.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.v10.skeletal$Age), y = as.numeric(df.v10.skeletal$Expression), method = 'spearman')
+  
+ggplot(df.v10.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+  geom_text(x=1.5, y=80, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.v10.skeletal[str_extract(sig_norm.v10.skeletal[i,1], pattern = '.+(?=\\.)')],  "Skeletal Muscle (V10)")
+
+ggsave(file.path('Results/V10/Muscle_skeletal', paste('Barplot_',res.notch.SYMBOL.v10.skeletal[str_extract(sig_norm.v10.skeletal[i,1], pattern = '.+(?=\\.)')],'_tpm.png', sep = '')))
+
+print(paste(sig_norm.v10.skeletal[i,1],' VS Age'))
+print(cor.temp)
+```
+
+```{r}
+# Find target's index
+target = 'NOTCH2'
+i = which(res.notch.SYMBOL.v10.skeletal==target)
+i = names(res.notch.SYMBOL.v10.skeletal)[i]
+i = which(str_extract(sig_norm.v10.skeletal[,1], pattern = '.+(?=\\.)')==i)
+
+df.v10.skeletal <- cbind(t(mat.v10.skeletal[i,]), ann.col.v10.skeletal)
+  colnames(df.v10.skeletal) <- c('Expression', 'Age')
+cor.temp = cor.test(rank(df.v10.skeletal$Age), y = as.numeric(df.v10.skeletal$Expression), method = 'spearman')
+  
+ggplot(df.v10.skeletal, aes(x=Age, y=Expression)) +
+    geom_boxplot()+
+  geom_text(x=5.5, y=12, label=paste("rho=", signif(cor.temp$estimate,3), " p=",signif(cor.temp$p.value,3)), sep = '')+
+  ggtitle(res.notch.SYMBOL.v10.skeletal[str_extract(sig_norm.v10.skeletal[i,1], pattern = '.+(?=\\.)')],  "Skeletal Muscle (V10)")
+
+ggsave(file.path('Results/V10/Muscle_skeletal', paste('Barplot_',res.notch.SYMBOL.v10.skeletal[str_extract(sig_norm.v10.skeletal[i,1], pattern = '.+(?=\\.)')],'_tpm.png', sep = '')))
+
+print(paste(sig_norm.v10.skeletal[i,1],' VS Age'))
+print(cor.temp)
+```
