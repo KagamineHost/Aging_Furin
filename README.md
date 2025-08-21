@@ -9,3 +9,14 @@ This Github Repo exists for the purpose of giving individuals the ability to rep
 ## Data Availability
 
 The raw datasets analyzed in this study are publicly available through the Genotype-Tissue Expression (GTEx) Project (https://gtexportal.org/). Data can be accessed via the GTEx Portal or via our UBox cloud storage upon request.
+
+## Content
+
+This repository include:
+* **Main Code**:
+  * **Project_GIT.RMD**: Main code for analysis and visualization used for the paper.
+  * **gProfiler_hsapiens_3-21-2025_1-10-43 PM.csv**: List of molecules investigated in the analysis.
+* **Results**: Plots that are generated from main codes and displayed in the paper.
+  * **Skin_lower_leg**: Plots generated with "GTEx V8 Gene read counts for Skin - Sun Exposed (Lower leg)" data.
+  * **Skin_suprapubic**: Plots generated with "GTEx V8 Gene read counts for Skin - Not Sun Exposed (Suprapubic)." data.
+
