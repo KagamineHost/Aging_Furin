@@ -11,8 +11,7 @@ This Github Repo exists for the purpose of giving individuals the ability to rep
 The raw datasets analyzed in this study are publicly available through the Genotype-Tissue Expression (GTEx) Project (https://gtexportal.org/). Data can be accessed via the GTEx Portal or via our UBox cloud storage upon request.
 
 ## Content
-
-This repository include:
+This repository include R notebook with the codes for the in-silica analysis and the results.
 * **Main_Code**:
   * **Project_GIT.RMD**: Main code for analysis and visualization used for the paper.
   * **Molecules.csv**: List of molecules investigated in the analysis.
