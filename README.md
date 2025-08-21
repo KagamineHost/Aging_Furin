@@ -16,7 +16,7 @@ This repository include:
 * **Main_Code**:
   * **Project_GIT.RMD**: Main code for analysis and visualization used for the paper.
   * **Molecules.csv**: List of molecules investigated in the analysis.
-* **Results**: Plots that are generated from main codes and displayed in the paper.
-  * **Skin_lower_leg**: Plots generated with "GTEx V8 Gene read counts for Skin - Sun Exposed (Lower leg)" data.
-  * **Skin_suprapubic**: Plots generated with "GTEx V8 Gene read counts for Skin - Not Sun Exposed (Suprapubic)." data.
+* **Results**: Results and visualization that are generated with main codes and displayed in the paper.
+  * **Skin_lower_leg**: Results and visualization for "GTEx V8 Gene read counts for Skin - Sun Exposed (Lower leg)" data.
+  * **Skin_suprapubic**: Results and visualization for "GTEx V8 Gene read counts for Skin - Not Sun Exposed (Suprapubic)." data.
 
