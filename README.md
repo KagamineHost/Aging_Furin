@@ -13,9 +13,9 @@ The raw datasets analyzed in this study are publicly available through the Genot
 ## Content
 
 This repository include:
-* **Main Code**:
+* **Main_Code**:
   * **Project_GIT.RMD**: Main code for analysis and visualization used for the paper.
-  * **gProfiler_hsapiens_3-21-2025_1-10-43 PM.csv**: List of molecules investigated in the analysis.
+  * **Molecules.csv**: List of molecules investigated in the analysis.
 * **Results**: Plots that are generated from main codes and displayed in the paper.
   * **Skin_lower_leg**: Plots generated with "GTEx V8 Gene read counts for Skin - Sun Exposed (Lower leg)" data.
   * **Skin_suprapubic**: Plots generated with "GTEx V8 Gene read counts for Skin - Not Sun Exposed (Suprapubic)." data.
